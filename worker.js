@@ -457,7 +457,13 @@ export class GameRoom {
     this.gameState.maxRounds = this.gameState.config.maxRounds;
     for (const [id, s] of this.sessions) { s.score = 0; this.gameState.scores[id] = 0; }
     const allIds = [...this.sessions.keys()];
-    for (let i = allIds.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [allIds[i], allIds[j]] = [allIds[j], allIds[i]]; }
+    // Fisher-Yates shuffle — 3x pass untuk memastikan benar-benar acak
+    for (let pass = 0; pass < 3; pass++) {
+      for (let i = allIds.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [allIds[i], allIds[j]] = [allIds[j], allIds[i]];
+      }
+    }
     this.gameState.playerOrder = allIds;
     this.broadcast({ type: 'game_starting', countdown: 3, playerOrder: allIds.map(id => ({ clientId: id, username: this.sessions.get(id)?.username })) });
     this.notifyRegistry({ phase: 'playing' });
@@ -520,7 +526,8 @@ export class GameRoom {
     this.broadcast({ type: 'game_end', scores: finalScores, winner: finalScores[0]?.username });
     this.notifyRegistry({ phase: 'lobby' });
     setTimeout(() => {
-      this.gameState.phase = 'lobby'; this.gameState.playerOrder = [];
+      this.gameState.phase = 'lobby';
+      this.gameState.playerOrder = []; // reset urutan, akan diacak ulang saat startGame berikutnya
       for (const s of this.sessions.values()) { s.isReady = false; s.score = 0; }
       this.broadcast({ type: 'back_to_lobby', players: this.getPlayerList() });
     }, 10000);
