@@ -1,4 +1,4 @@
-name = "skribbl-game"
+name = "mainyuk"
 main = "worker.js"
 compatibility_date = "2024-01-01"
 
@@ -8,4 +8,4 @@ class_name = "GameRoom"
 
 [[migrations]]
 tag = "v1"
-new_classes = ["GameRoom"]
+new_sqlite_classes = ["GameRoom"]
