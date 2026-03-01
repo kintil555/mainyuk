@@ -1,21 +1,12 @@
 // =============================================================================
 // CLOUDFLARE WORKER - Skribbl-style Drawing Game
-// Deploy sebagai Cloudflare Worker dengan Durable Objects enabled
-//
-// SETUP SECRET KEY:
-//   Cloudflare Dashboard → Workers → Settings → Variables → Add Secret
-//   Name: TURNSTILE_SECRET
-//   Value: (isi dengan secret key Turnstile kamu)
 // =============================================================================
 
-// =============================================================================
-// CONFIG ANTRIAN
-// =============================================================================
 const QUEUE_CONFIG = {
-  MAX_CONCURRENT_CREATES: 3,   // Maks pembuatan room bersamaan tanpa antri
-  BASE_WAIT_PER_PERSON: 45,    // Detik tunggu per orang di depan (45 detik)
-  MAX_WAIT_SECONDS: 240,       // Maks tunggu 4 menit
-  QUEUE_EXPIRY_MS: 5 * 60 * 1000, // Entry antrian kedaluwarsa setelah 5 menit
+  MAX_CONCURRENT_CREATES: 3,
+  BASE_WAIT_PER_PERSON: 45,
+  MAX_WAIT_SECONDS: 240,
+  QUEUE_EXPIRY_MS: 5 * 60 * 1000,
 };
 
 export default {
@@ -32,7 +23,6 @@ export default {
       return new Response(null, { headers: corsHeaders });
     }
 
-    // Route: WebSocket untuk room tertentu
     if (url.pathname.startsWith('/room/')) {
       const roomId = url.pathname.split('/')[2] || 'default';
       const id = env.GAME_ROOM.idFromName(roomId);
@@ -40,7 +30,6 @@ export default {
       return stub.fetch(request);
     }
 
-    // Route: Cek status antrian
     if (url.pathname === '/queue-status') {
       const queueId = url.searchParams.get('queueId');
       if (!queueId) {
@@ -57,7 +46,6 @@ export default {
       });
     }
 
-    // Route: Buat room baru — wajib lewat validasi Turnstile + sistem antri
     if (url.pathname === '/create-room') {
       let captchaToken = null;
       let queueId = null;
@@ -80,7 +68,6 @@ export default {
         });
       }
 
-      // Verifikasi CAPTCHA
       const secret = env.TURNSTILE_SECRET;
       if (secret) {
         const verifyRes = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
@@ -104,7 +91,6 @@ export default {
         }
       }
 
-      // Cek antrian via QueueManager Durable Object
       const queueStub = env.QUEUE_MANAGER.get(env.QUEUE_MANAGER.idFromName('global'));
       const clientIp = request.headers.get('CF-Connecting-IP') || 'unknown';
 
@@ -116,7 +102,6 @@ export default {
       const queueRes = await queueStub.fetch(queueReq);
       const queueData = await queueRes.json();
 
-      // Masih harus antri
       if (queueData.status === 'queued') {
         return new Response(JSON.stringify({
           queued: true,
@@ -129,10 +114,8 @@ export default {
         });
       }
 
-      // Giliran sudah tiba — buat room
       if (queueData.status === 'ready' || queueData.status === 'immediate') {
         const roomId = generateRoomId();
-        // Beritahu QueueManager bahwa slot ini selesai
         const doneReq = new Request('https://internal/done', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -156,14 +139,12 @@ export default {
 
 // =============================================================================
 // DURABLE OBJECT - Queue Manager
-// Mengelola antrian pembuatan room secara global
 // =============================================================================
 export class QueueManager {
   constructor(state, env) {
     this.state = state;
-    // queue: array of { queueId, clientIp, joinedAt, status: 'waiting'|'processing' }
     this.queue = [];
-    this.activeCount = 0; // Berapa yang sedang diproses
+    this.activeCount = 0;
     this.initialized = false;
   }
 
@@ -172,7 +153,6 @@ export class QueueManager {
     this.queue = (await this.state.storage.get('queue')) || [];
     this.activeCount = (await this.state.storage.get('activeCount')) || 0;
     this.initialized = true;
-    // Bersihkan entry kedaluwarsa saat load
     this.cleanExpired();
   }
 
@@ -188,7 +168,6 @@ export class QueueManager {
       if (now - e.joinedAt > QUEUE_CONFIG.QUEUE_EXPIRY_MS) return false;
       return true;
     });
-    // Kurangi activeCount jika ada yang expire saat processing
     const removed = before - this.queue.length;
     if (removed > 0) {
       this.activeCount = Math.max(0, this.activeCount - removed);
@@ -201,11 +180,10 @@ export class QueueManager {
 
   getPosition(queueId) {
     const waiting = this.getWaitingQueue();
-    return waiting.findIndex(e => e.queueId === queueId) + 1; // 1-based
+    return waiting.findIndex(e => e.queueId === queueId) + 1;
   }
 
   calcEstimatedWait(position) {
-    // Setiap orang di depan = BASE_WAIT_PER_PERSON detik + sedikit variasi
     const raw = position * QUEUE_CONFIG.BASE_WAIT_PER_PERSON;
     return Math.min(raw, QUEUE_CONFIG.MAX_WAIT_SECONDS);
   }
@@ -216,23 +194,19 @@ export class QueueManager {
 
     const url = new URL(request.url);
 
-    // POST /enqueue — tambah ke antrian atau langsung jika kosong
     if (url.pathname === '/enqueue') {
       const body = await request.json();
       let { queueId, clientIp } = body;
 
-      // Cek apakah queueId ini sudah ada di antrian
       if (queueId) {
         const existing = this.queue.find(e => e.queueId === queueId);
         if (existing) {
           if (existing.status === 'processing') {
-            // Giliran sudah tiba!
             await this.save();
             return new Response(JSON.stringify({ status: 'ready', queueId }), {
               headers: { 'Content-Type': 'application/json' },
             });
           } else {
-            // Masih menunggu
             const position = this.getPosition(queueId);
             const estimatedWait = this.calcEstimatedWait(position);
             await this.save();
@@ -243,10 +217,8 @@ export class QueueManager {
         }
       }
 
-      // Request baru
       const newQueueId = queueId || crypto.randomUUID().slice(0, 12);
 
-      // Slot langsung tersedia?
       if (this.activeCount < QUEUE_CONFIG.MAX_CONCURRENT_CREATES && this.getWaitingQueue().length === 0) {
         this.activeCount++;
         this.queue.push({ queueId: newQueueId, clientIp, joinedAt: Date.now(), status: 'processing' });
@@ -256,10 +228,7 @@ export class QueueManager {
         });
       }
 
-      // Harus antri
       this.queue.push({ queueId: newQueueId, clientIp, joinedAt: Date.now(), status: 'waiting' });
-
-      // Promosikan antrian yang bisa diproses
       this.promoteQueue();
 
       const position = this.getPosition(newQueueId);
@@ -271,7 +240,6 @@ export class QueueManager {
       }), { headers: { 'Content-Type': 'application/json' } });
     }
 
-    // GET /status — cek status antrian
     if (url.pathname === '/status') {
       const queueId = url.searchParams.get('queueId');
       const entry = this.queue.find(e => e.queueId === queueId);
@@ -298,7 +266,6 @@ export class QueueManager {
       }), { headers: { 'Content-Type': 'application/json' } });
     }
 
-    // POST /done — tandai slot selesai, promosikan antrian berikutnya
     if (url.pathname === '/done') {
       const body = await request.json();
       const { queueId } = body;
@@ -315,7 +282,6 @@ export class QueueManager {
   }
 
   promoteQueue() {
-    // Pindahkan entry 'waiting' ke 'processing' selama ada slot
     const waiting = this.getWaitingQueue();
     for (const entry of waiting) {
       if (this.activeCount >= QUEUE_CONFIG.MAX_CONCURRENT_CREATES) break;
@@ -352,7 +318,6 @@ const MIN_PLAYERS = 3;
 const MAX_PLAYERS = 5;
 const SCORE_BASE = 100;
 
-// Batas config yang diizinkan
 const CONFIG_LIMITS = {
   drawTime: { min: 30, max: 180, default: 80 },
   maxRounds: { min: 1, max: 10, default: 3 },
@@ -364,7 +329,7 @@ export class GameRoom {
     this.state = state;
     this.env = env;
     this.sessions = new Map();
-    this.hostId = null; // Pemain pertama yang join = host
+    this.hostId = null;
     this.gameState = {
       phase: 'lobby',
       round: 0,
@@ -378,7 +343,9 @@ export class GameRoom {
       scores: {},
       roundWinners: [],
       revealedPositions: new Set(),
-      // Konfigurasi game (bisa diubah host di lobby)
+      // ✅ playerOrder: urutan drawer yang sudah diacak saat startGame()
+      // Index ini yang dipakai nextRound(), bukan sessions.keys()
+      playerOrder: [],
       config: {
         drawTime: CONFIG_LIMITS.drawTime.default,
         maxRounds: CONFIG_LIMITS.maxRounds.default,
@@ -417,7 +384,6 @@ export class GameRoom {
 
     this.sessions.set(clientId, session);
 
-    // Pemain pertama yang join = host
     if (!this.hostId) {
       this.hostId = clientId;
     }
@@ -460,8 +426,6 @@ export class GameRoom {
     const session = this.sessions.get(clientId);
     if (!session) return;
 
-    // ✅ Fix: pindahkan semua case ke blok if-else agar tidak ada masalah
-    //    `const` di dalam switch yang menyebabkan error di beberapa runtime
     const type = msg.type;
 
     if (type === 'set_username') {
@@ -469,7 +433,6 @@ export class GameRoom {
       this.broadcast({ type: 'player_joined', players: this.getPlayerList(), playerCount: this.sessions.size, hostId: this.hostId });
 
     } else if (type === 'set_config') {
-      // Hanya host yang boleh ubah config, dan hanya saat di lobby
       if (clientId !== this.hostId) return;
       if (this.gameState.phase !== 'lobby') return;
 
@@ -482,10 +445,8 @@ export class GameRoom {
       }
       if (msg.maxPlayers !== undefined) {
         const newMax = Math.max(CONFIG_LIMITS.maxPlayers.min, Math.min(CONFIG_LIMITS.maxPlayers.max, parseInt(msg.maxPlayers) || cfg.maxPlayers));
-        // Tidak boleh kurangi di bawah jumlah pemain yang sudah ada
         cfg.maxPlayers = Math.max(newMax, this.sessions.size);
       }
-      // Broadcast config baru ke semua
       this.broadcast({ type: 'config_update', config: cfg, hostId: this.hostId });
 
     } else if (type === 'set_ready') {
@@ -505,26 +466,21 @@ export class GameRoom {
       this.broadcast({ type: 'clear_canvas' });
 
     } else if (type === 'set_word') {
-      // Drawer mengirim kata yang dipilih sendiri
       if (clientId !== this.gameState.drawerId) return;
       if (this.gameState.phase !== 'drawing') return;
-      if (this.gameState.currentWord) return; // sudah di-set
+      if (this.gameState.currentWord) return;
       const word = (msg.word || '').toLowerCase().trim().replace(/[^a-z0-9 ]/gi, '').slice(0, 30);
       if (!word || word.length < 2) return;
       this.gameState.currentWord = word;
-      // Buat hint: hanya huruf ke-2 (index 1) yang kelihatan
       this.gameState.wordHint = this.buildSecondLetterHint(word);
-      // Kirim hint ke guesser
       this.broadcastExcept(this.gameState.drawerId, {
         type: 'hint_update',
         hint: this.gameState.wordHint,
         wordLength: word.length,
       });
-      // Mulai timer sekarang
       this.startRoundTimer();
 
     } else if (type === 'approve_guess') {
-      // Drawer approve jawaban peserta
       if (clientId !== this.gameState.drawerId) return;
       if (this.gameState.phase !== 'drawing') return;
       const targetId = msg.clientId;
@@ -577,8 +533,7 @@ export class GameRoom {
     if (this.gameState.phase !== 'drawing') return;
     if (clientId === this.gameState.drawerId) return;
     if (this.gameState.correctGuessers.has(clientId)) return;
-    if (!this.gameState.currentWord) return; // belum ada kata
-    // Semua tebakan dikirim sebagai wrong_guess — drawer yang approve via tombol ✓
+    if (!this.gameState.currentWord) return;
     this.broadcast({
       type: 'wrong_guess',
       username: session.username,
@@ -602,7 +557,6 @@ export class GameRoom {
 
     this.gameState.round = 0;
     this.gameState.phase = 'starting';
-    // Terapkan config ke gameState sebelum mulai
     this.gameState.maxRounds = this.gameState.config.maxRounds;
 
     for (const [id, session] of this.sessions) {
@@ -610,7 +564,10 @@ export class GameRoom {
       this.gameState.scores[id] = 0;
     }
 
-    // Acak urutan pemain sekali di awal game
+    // ✅ Buat urutan drawer yang benar-benar acak:
+    //    - Ambil semua pemain yang ada
+    //    - Fisher-Yates shuffle
+    //    - Simpan ke playerOrder — inilah urutan giliran menggambar sepanjang game
     const allIds = [...this.sessions.keys()];
     for (let i = allIds.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
@@ -618,12 +575,22 @@ export class GameRoom {
     }
     this.gameState.playerOrder = allIds;
 
-    this.broadcast({ type: 'game_starting', countdown: 3 });
+    // Kirim playerOrder ke semua client agar tahu urutan giliran
+    this.broadcast({
+      type: 'game_starting',
+      countdown: 3,
+      playerOrder: allIds.map(id => ({
+        clientId: id,
+        username: this.sessions.get(id)?.username,
+      })),
+    });
+
     setTimeout(() => this.nextRound(), 3000);
   }
 
   nextRound() {
-    if (this.gameState.round >= this.gameState.maxRounds * this.sessions.size) {
+    const totalRounds = this.gameState.maxRounds * this.gameState.playerOrder.length;
+    if (this.gameState.round >= totalRounds) {
       this.endGame();
       return;
     }
@@ -631,41 +598,64 @@ export class GameRoom {
     this.gameState.round++;
     this.gameState.correctGuessers = new Set();
     this.gameState.drawingData = [];
-    this.gameState.timeLeft = this.gameState.config.drawTime; // pakai config
+    this.gameState.timeLeft = this.gameState.config.drawTime;
     this.gameState.roundWinners = [];
     this.gameState.revealedPositions = new Set();
     this.gameState.currentWord = null;
     this.gameState.wordHint = null;
 
-    const playerIds = [...this.sessions.keys()];
-    const drawerIndex = (this.gameState.round - 1) % playerIds.length;
-    this.gameState.drawerId = playerIds[drawerIndex];
+    // ✅ PERBAIKAN UTAMA:
+    //    Gunakan playerOrder (urutan acak dari startGame) bukan sessions.keys()
+    //    Kalau ada pemain yang disconnect, skip dan cari yang masih aktif
+    const orderLen = this.gameState.playerOrder.length;
+    const roundIdx  = (this.gameState.round - 1) % orderLen;
+
+    // Cari drawer di urutan ini yang masih terhubung
+    // Jika disconnect, geser ke slot berikutnya dalam playerOrder
+    let drawerId = null;
+    for (let attempt = 0; attempt < orderLen; attempt++) {
+      const candidateIdx = (roundIdx + attempt) % orderLen;
+      const candidateId  = this.gameState.playerOrder[candidateIdx];
+      if (this.sessions.has(candidateId)) {
+        drawerId = candidateId;
+        break;
+      }
+    }
+
+    // Tidak ada pemain yang aktif sama sekali (edge case)
+    if (!drawerId) {
+      this.endGame();
+      return;
+    }
+
+    this.gameState.drawerId = drawerId;
     this.gameState.phase = 'drawing';
 
-    // Kirim ke drawer — tanpa kata, drawer yang input sendiri
-    this.send(this.gameState.drawerId, {
+    const drawerName = this.sessions.get(drawerId)?.username;
+    const totalRoundsDisplay = this.gameState.maxRounds * this.gameState.playerOrder.length;
+
+    // Kirim ke drawer
+    this.send(drawerId, {
       type: 'round_start_drawer',
       round: this.gameState.round,
-      maxRounds: this.gameState.maxRounds * playerIds.length,
-      drawerName: this.sessions.get(this.gameState.drawerId)?.username,
-      timeLeft: DRAW_TIME,
+      maxRounds: totalRoundsDisplay,
+      drawerName,
+      timeLeft: this.gameState.config.drawTime,
     });
 
-    // Kirim ke guesser — menunggu hint dari drawer
-    this.broadcastExcept(this.gameState.drawerId, {
+    // Kirim ke guesser
+    this.broadcastExcept(drawerId, {
       type: 'round_start_guesser',
       round: this.gameState.round,
-      maxRounds: this.gameState.maxRounds * playerIds.length,
-      drawerId: this.gameState.drawerId,
-      drawerName: this.sessions.get(this.gameState.drawerId)?.username,
+      maxRounds: totalRoundsDisplay,
+      drawerId,
+      drawerName,
       hint: '____',
       wordLength: 0,
-      timeLeft: DRAW_TIME,
+      timeLeft: this.gameState.config.drawTime,
     });
-    // Timer dimulai setelah drawer submit kata (set_word)
   }
 
-  // Hint: hanya huruf ke-2 (index 1) tiap kata yang kelihatan
   buildSecondLetterHint(word) {
     return word.split('').map((c, i) => {
       if (c === ' ') return ' ';
@@ -677,7 +667,6 @@ export class GameRoom {
     if (this.timerInterval) clearInterval(this.timerInterval);
 
     const drawTime = this.gameState.config.drawTime;
-    // Waktu reveal: di 50% dan 75% waktu berlalu
     const revealAtElapsed = [
       Math.floor(drawTime * 0.5),
       Math.floor(drawTime * 0.75),
@@ -686,10 +675,9 @@ export class GameRoom {
 
     this.timerInterval = setInterval(() => {
       this.gameState.timeLeft--;
-      const elapsed = DRAW_TIME - this.gameState.timeLeft;
+      const elapsed = drawTime - this.gameState.timeLeft;
       const revealCount = revealAtElapsed.filter(t => elapsed >= t).length;
 
-      // ✅ Hanya update hint jika jumlah reveal bertambah
       if (revealCount > lastRevealCount) {
         lastRevealCount = revealCount;
         const newHint = this.revealMoreHint(this.gameState.currentWord, revealCount);
@@ -741,6 +729,7 @@ export class GameRoom {
 
     setTimeout(() => {
       this.gameState.phase = 'lobby';
+      this.gameState.playerOrder = [];
       for (const session of this.sessions.values()) {
         session.isReady = false;
         session.score = 0;
@@ -752,7 +741,6 @@ export class GameRoom {
   handleDisconnect(clientId) {
     this.sessions.delete(clientId);
 
-    // Kalau host yang disconnect, pindah ke pemain berikutnya
     if (this.hostId === clientId) {
       const next = this.sessions.keys().next().value;
       this.hostId = next || null;
@@ -781,29 +769,20 @@ export class GameRoom {
     }
   }
 
-  pickWords(count) {
-    const shuffled = [...ALL_WORDS].sort(() => Math.random() - 0.5);
-    return shuffled.slice(0, count);
-  }
-
-  // ✅ Generate hint awal: semua tersembunyi (hanya spasi yang kelihatan)
   generateInitialHint(word) {
     this.gameState.revealedPositions = new Set();
     return word.split('').map(c => c === ' ' ? ' ' : '_').join('');
   }
 
-  // ✅ Reveal huruf secara bertahap — posisi yang sudah terbuka tidak berubah
   revealMoreHint(word, totalRevealCount) {
     const chars = word.split('');
     const hiddenPositions = chars
       .map((c, i) => i)
       .filter(i => chars[i] !== ' ' && !this.gameState.revealedPositions.has(i));
 
-    // Hitung berapa huruf yang harus ditambah
     const targetTotal = Math.floor(chars.filter(c => c !== ' ').length * totalRevealCount * 0.3);
     const toAdd = Math.max(0, targetTotal - this.gameState.revealedPositions.size);
 
-    // Acak posisi yang belum terbuka dan ambil sejumlah toAdd
     const shuffled = hiddenPositions.sort(() => Math.random() - 0.5);
     for (let i = 0; i < toAdd && i < shuffled.length; i++) {
       this.gameState.revealedPositions.add(shuffled[i]);
