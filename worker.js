@@ -352,11 +352,19 @@ const MIN_PLAYERS = 3;
 const MAX_PLAYERS = 5;
 const SCORE_BASE = 100;
 
+// Batas config yang diizinkan
+const CONFIG_LIMITS = {
+  drawTime: { min: 30, max: 180, default: 80 },
+  maxRounds: { min: 1, max: 10, default: 3 },
+  maxPlayers: { min: 3, max: 8, default: 5 },
+};
+
 export class GameRoom {
   constructor(state, env) {
     this.state = state;
     this.env = env;
     this.sessions = new Map();
+    this.hostId = null; // Pemain pertama yang join = host
     this.gameState = {
       phase: 'lobby',
       round: 0,
@@ -369,10 +377,13 @@ export class GameRoom {
       drawingData: [],
       scores: {},
       roundWinners: [],
-      // Menyimpan posisi huruf yang sudah dibuka agar konsisten
       revealedPositions: new Set(),
-      // Urutan pemain yang sudah di-shuffle untuk giliran drawer
-      playerOrder: [],
+      // Konfigurasi game (bisa diubah host di lobby)
+      config: {
+        drawTime: CONFIG_LIMITS.drawTime.default,
+        maxRounds: CONFIG_LIMITS.maxRounds.default,
+        maxPlayers: CONFIG_LIMITS.maxPlayers.default,
+      },
     };
     this.timerInterval = null;
   }
@@ -406,6 +417,11 @@ export class GameRoom {
 
     this.sessions.set(clientId, session);
 
+    // Pemain pertama yang join = host
+    if (!this.hostId) {
+      this.hostId = clientId;
+    }
+
     ws.addEventListener('message', async (event) => {
       try {
         const msg = JSON.parse(event.data);
@@ -426,14 +442,17 @@ export class GameRoom {
     this.send(clientId, {
       type: 'welcome',
       clientId,
+      hostId: this.hostId,
       gameState: this.getPublicGameState(),
       players: this.getPlayerList(),
+      config: this.gameState.config,
     });
 
     this.broadcast({
       type: 'player_joined',
       players: this.getPlayerList(),
       playerCount: this.sessions.size,
+      hostId: this.hostId,
     }, clientId);
   }
 
@@ -447,7 +466,27 @@ export class GameRoom {
 
     if (type === 'set_username') {
       session.username = msg.username.slice(0, 20).trim() || session.username;
-      this.broadcast({ type: 'player_joined', players: this.getPlayerList(), playerCount: this.sessions.size });
+      this.broadcast({ type: 'player_joined', players: this.getPlayerList(), playerCount: this.sessions.size, hostId: this.hostId });
+
+    } else if (type === 'set_config') {
+      // Hanya host yang boleh ubah config, dan hanya saat di lobby
+      if (clientId !== this.hostId) return;
+      if (this.gameState.phase !== 'lobby') return;
+
+      const cfg = this.gameState.config;
+      if (msg.drawTime !== undefined) {
+        cfg.drawTime = Math.max(CONFIG_LIMITS.drawTime.min, Math.min(CONFIG_LIMITS.drawTime.max, parseInt(msg.drawTime) || cfg.drawTime));
+      }
+      if (msg.maxRounds !== undefined) {
+        cfg.maxRounds = Math.max(CONFIG_LIMITS.maxRounds.min, Math.min(CONFIG_LIMITS.maxRounds.max, parseInt(msg.maxRounds) || cfg.maxRounds));
+      }
+      if (msg.maxPlayers !== undefined) {
+        const newMax = Math.max(CONFIG_LIMITS.maxPlayers.min, Math.min(CONFIG_LIMITS.maxPlayers.max, parseInt(msg.maxPlayers) || cfg.maxPlayers));
+        // Tidak boleh kurangi di bawah jumlah pemain yang sudah ada
+        cfg.maxPlayers = Math.max(newMax, this.sessions.size);
+      }
+      // Broadcast config baru ke semua
+      this.broadcast({ type: 'config_update', config: cfg, hostId: this.hostId });
 
     } else if (type === 'set_ready') {
       session.isReady = msg.ready;
@@ -493,7 +532,7 @@ export class GameRoom {
       const targetSession = this.sessions.get(targetId);
       if (!targetSession) return;
       this.gameState.correctGuessers.add(targetId);
-      const timeBonus = Math.floor((this.gameState.timeLeft / DRAW_TIME) * SCORE_BASE);
+      const timeBonus = Math.floor((this.gameState.timeLeft / this.gameState.config.drawTime) * SCORE_BASE);
       const points = SCORE_BASE + timeBonus;
       targetSession.score += points;
       this.gameState.scores[targetId] = targetSession.score;
@@ -563,13 +602,15 @@ export class GameRoom {
 
     this.gameState.round = 0;
     this.gameState.phase = 'starting';
+    // Terapkan config ke gameState sebelum mulai
+    this.gameState.maxRounds = this.gameState.config.maxRounds;
 
     for (const [id, session] of this.sessions) {
       session.score = 0;
       this.gameState.scores[id] = 0;
     }
 
-    // Acak urutan pemain sekali di awal game — ini yang menentukan giliran drawer
+    // Acak urutan pemain sekali di awal game
     const allIds = [...this.sessions.keys()];
     for (let i = allIds.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
@@ -590,18 +631,13 @@ export class GameRoom {
     this.gameState.round++;
     this.gameState.correctGuessers = new Set();
     this.gameState.drawingData = [];
-    this.gameState.timeLeft = DRAW_TIME;
+    this.gameState.timeLeft = this.gameState.config.drawTime; // pakai config
     this.gameState.roundWinners = [];
     this.gameState.revealedPositions = new Set();
-    this.gameState.currentWord = null; // drawer yang isi
+    this.gameState.currentWord = null;
     this.gameState.wordHint = null;
 
-    // Pakai playerOrder yang sudah di-shuffle — bukan sessions.keys() yang selalu urut join
-    const playerIds = this.gameState.playerOrder.filter(id => this.sessions.has(id));
-    // Kalau ada pemain baru join setelah game mulai, tambahkan di akhir
-    for (const id of this.sessions.keys()) {
-      if (!playerIds.includes(id)) playerIds.push(id);
-    }
+    const playerIds = [...this.sessions.keys()];
     const drawerIndex = (this.gameState.round - 1) % playerIds.length;
     this.gameState.drawerId = playerIds[drawerIndex];
     this.gameState.phase = 'drawing';
@@ -640,10 +676,11 @@ export class GameRoom {
   startRoundTimer() {
     if (this.timerInterval) clearInterval(this.timerInterval);
 
-    // Waktu reveal: di 50% dan 25% sisa waktu
+    const drawTime = this.gameState.config.drawTime;
+    // Waktu reveal: di 50% dan 75% waktu berlalu
     const revealAtElapsed = [
-      Math.floor(DRAW_TIME * 0.5),
-      Math.floor(DRAW_TIME * 0.75),
+      Math.floor(drawTime * 0.5),
+      Math.floor(drawTime * 0.75),
     ];
     let lastRevealCount = 0;
 
@@ -715,11 +752,18 @@ export class GameRoom {
   handleDisconnect(clientId) {
     this.sessions.delete(clientId);
 
+    // Kalau host yang disconnect, pindah ke pemain berikutnya
+    if (this.hostId === clientId) {
+      const next = this.sessions.keys().next().value;
+      this.hostId = next || null;
+    }
+
     this.broadcast({
       type: 'player_left',
       clientId,
       players: this.getPlayerList(),
       playerCount: this.sessions.size,
+      hostId: this.hostId,
     });
 
     if (this.gameState.phase === 'drawing' && this.gameState.drawerId === clientId) {
@@ -798,6 +842,7 @@ export class GameRoom {
       hint: this.gameState.wordHint,
       wordLength: this.gameState.currentWord?.length,
       playerCount: this.sessions.size,
+      config: this.gameState.config,
     };
   }
 
