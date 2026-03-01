@@ -557,4 +557,4 @@ export class GameRoom {
   send(clientId, data) { const s = this.sessions.get(clientId); if (s?.ws.readyState === WebSocket.OPEN) try { s.ws.send(JSON.stringify(data)); } catch(_) {} }
   broadcast(data, excludeId = null) { const j = JSON.stringify(data); for (const [id,s] of this.sessions) { if (id === excludeId) continue; if (s.ws.readyState === WebSocket.OPEN) try { s.ws.send(j); } catch(_) {} } }
   broadcastExcept(excludeId, data) { this.broadcast(data, excludeId); }
-}v
+}
