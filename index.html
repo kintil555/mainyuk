@@ -1,0 +1,1551 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>GambarYuk! 🎨</title>
+<link href="https://fonts.googleapis.com/css2?family=Fredoka+One&family=Nunito:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #1a1a2e;
+  --surface: #16213e;
+  --card: #0f3460;
+  --accent: #e94560;
+  --accent2: #f5a623;
+  --accent3: #00d2d3;
+  --text: #eee;
+  --text-muted: #8892a4;
+  --radius: 16px;
+  --shadow: 0 8px 32px rgba(0,0,0,0.4);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+
+body {
+  font-family: 'Nunito', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  overflow: hidden;
+}
+
+/* Animated BG */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: 
+    radial-gradient(ellipse at 20% 20%, rgba(233,69,96,0.12) 0%, transparent 50%),
+    radial-gradient(ellipse at 80% 80%, rgba(0,210,211,0.1) 0%, transparent 50%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+h1.logo {
+  font-family: 'Fredoka One', cursive;
+  font-size: clamp(2rem, 5vw, 3.5rem);
+  background: linear-gradient(135deg, var(--accent), var(--accent2), var(--accent3));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  text-align: center;
+  letter-spacing: 2px;
+}
+
+/* ===== SCREENS ===== */
+.screen {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.screen.active { display: flex; flex-direction: column; }
+
+/* ===== LOBBY SCREEN ===== */
+#screen-lobby {
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  gap: 20px;
+}
+
+.lobby-card {
+  background: var(--card);
+  border-radius: var(--radius);
+  padding: 28px;
+  width: 100%;
+  max-width: 440px;
+  box-shadow: var(--shadow);
+  border: 1px solid rgba(255,255,255,0.07);
+}
+
+.lobby-card h2 {
+  font-family: 'Fredoka One', cursive;
+  font-size: 1.4rem;
+  margin-bottom: 16px;
+  color: var(--accent2);
+}
+
+.input-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+input[type="text"] {
+  background: rgba(255,255,255,0.07);
+  border: 2px solid rgba(255,255,255,0.1);
+  border-radius: 10px;
+  padding: 12px 16px;
+  color: var(--text);
+  font-family: 'Nunito', sans-serif;
+  font-size: 1rem;
+  font-weight: 600;
+  outline: none;
+  transition: border-color 0.2s;
+  width: 100%;
+}
+input[type="text"]:focus { border-color: var(--accent3); }
+input[type="text"]::placeholder { color: var(--text-muted); }
+
+.btn {
+  border: none;
+  border-radius: 12px;
+  padding: 13px 24px;
+  font-family: 'Nunito', sans-serif;
+  font-size: 1rem;
+  font-weight: 800;
+  cursor: pointer;
+  transition: transform 0.15s, opacity 0.2s, box-shadow 0.15s;
+  letter-spacing: 0.5px;
+  width: 100%;
+}
+.btn:active { transform: scale(0.97); }
+.btn-primary {
+  background: linear-gradient(135deg, var(--accent), #c0392b);
+  color: white;
+  box-shadow: 0 4px 15px rgba(233,69,96,0.4);
+}
+.btn-primary:hover { box-shadow: 0 6px 20px rgba(233,69,96,0.6); }
+.btn-secondary {
+  background: linear-gradient(135deg, var(--accent3), #0097a7);
+  color: white;
+  box-shadow: 0 4px 15px rgba(0,210,211,0.3);
+}
+.btn-danger {
+  background: linear-gradient(135deg, #636e72, #2d3436);
+  color: white;
+}
+.btn-green {
+  background: linear-gradient(135deg, #00b894, #00cec9);
+  color: white;
+  box-shadow: 0 4px 15px rgba(0,184,148,0.3);
+}
+
+.divider {
+  text-align: center;
+  color: var(--text-muted);
+  margin: 14px 0;
+  font-size: 0.85rem;
+  position: relative;
+}
+.divider::before, .divider::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  width: 40%;
+  height: 1px;
+  background: rgba(255,255,255,0.1);
+}
+.divider::before { left: 0; }
+.divider::after { right: 0; }
+
+/* ===== WAITING ROOM ===== */
+#screen-waiting {
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  gap: 16px;
+}
+
+.waiting-card {
+  background: var(--card);
+  border-radius: var(--radius);
+  padding: 24px;
+  width: 100%;
+  max-width: 480px;
+  box-shadow: var(--shadow);
+}
+
+.room-code {
+  text-align: center;
+  margin-bottom: 20px;
+}
+.room-code label {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 2px;
+}
+.room-code .code {
+  font-family: 'Fredoka One', cursive;
+  font-size: 2.5rem;
+  color: var(--accent2);
+  letter-spacing: 8px;
+  display: block;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+.room-code .code:hover { opacity: 0.7; }
+.room-code .copy-hint { font-size: 0.75rem; color: var(--text-muted); margin-top: 4px; }
+
+.player-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.player-slot {
+  background: rgba(255,255,255,0.05);
+  border-radius: 10px;
+  padding: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 2px solid transparent;
+  transition: border-color 0.3s;
+}
+.player-slot.filled { border-color: rgba(0,210,211,0.3); }
+.player-slot.ready { border-color: rgba(0,184,148,0.6); }
+.player-slot .avatar {
+  width: 36px; height: 36px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1.2rem;
+  flex-shrink: 0;
+}
+.player-slot .info { flex: 1; min-width: 0; }
+.player-slot .name { font-weight: 700; font-size: 0.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.player-slot .status { font-size: 0.72rem; color: var(--text-muted); }
+.player-slot .status.ready { color: #00b894; }
+.player-slot.empty .name { color: var(--text-muted); font-style: italic; }
+
+.waiting-info {
+  text-align: center;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+}
+
+/* ===== GAME SCREEN ===== */
+#screen-game {
+  flex-direction: column;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+.game-header {
+  background: var(--surface);
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.07);
+  flex-shrink: 0;
+  z-index: 100;
+}
+
+.timer-display {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.timer-num {
+  font-family: 'Fredoka One', cursive;
+  font-size: 1.8rem;
+  line-height: 1;
+  transition: color 0.5s;
+}
+.timer-num.urgent { color: var(--accent); animation: pulse 0.5s infinite; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.6} }
+
+.round-info {
+  text-align: center;
+  flex: 1;
+}
+.round-text { font-size: 0.75rem; color: var(--text-muted); }
+.drawer-text { font-weight: 700; font-size: 0.85rem; }
+.drawer-text span { color: var(--accent2); }
+
+.word-display {
+  font-family: 'Fredoka One', cursive;
+  font-size: clamp(1rem, 2.5vw, 1.6rem);
+  letter-spacing: 6px;
+  color: var(--accent3);
+  text-align: center;
+  padding: 6px;
+}
+
+/* Game body */
+.game-body {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  gap: 0;
+}
+
+/* Canvas area */
+.canvas-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--bg);
+  position: relative;
+}
+
+#game-canvas {
+  display: block;
+  background: white;
+  cursor: crosshair;
+  touch-action: none;
+  flex: 1;
+  width: 100%;
+}
+
+.draw-tools {
+  background: var(--surface);
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-top: 1px solid rgba(255,255,255,0.07);
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+
+.color-picker-wrap {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.color-swatch {
+  width: 24px; height: 24px;
+  border-radius: 50%;
+  cursor: pointer;
+  border: 2px solid transparent;
+  transition: transform 0.15s, border-color 0.15s;
+  flex-shrink: 0;
+}
+.color-swatch:hover { transform: scale(1.2); }
+.color-swatch.active { border-color: white; transform: scale(1.1); }
+
+.size-picker {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.size-btn {
+  background: rgba(255,255,255,0.1);
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: background 0.15s;
+  flex-shrink: 0;
+}
+.size-btn:hover { background: rgba(255,255,255,0.2); }
+.size-btn.active { background: var(--accent3); }
+
+.tool-btn {
+  background: rgba(255,255,255,0.1);
+  border: none;
+  border-radius: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+  color: var(--text);
+  font-size: 0.85rem;
+  font-family: 'Nunito', sans-serif;
+  font-weight: 700;
+  transition: background 0.15s;
+  white-space: nowrap;
+}
+.tool-btn:hover { background: rgba(255,255,255,0.2); }
+.tool-btn.eraser.active { background: var(--accent2); color: #1a1a2e; }
+
+/* Sidebar */
+.sidebar {
+  width: 200px;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border-left: 1px solid rgba(255,255,255,0.07);
+  flex-shrink: 0;
+}
+
+.players-panel {
+  padding: 10px;
+  border-bottom: 1px solid rgba(255,255,255,0.07);
+  flex-shrink: 0;
+}
+.panel-title {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.player-score-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 0;
+  font-size: 0.82rem;
+}
+.player-score-item .ava {
+  font-size: 1rem;
+  width: 24px; height: 24px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.player-score-item .pname { flex: 1; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.player-score-item .pscore { color: var(--accent2); font-weight: 800; font-size: 0.78rem; }
+.player-score-item.drawer { background: rgba(245,166,35,0.1); border-radius: 8px; padding: 5px 6px; }
+.player-score-item.guessed .pname { color: #00b894; text-decoration: line-through; opacity: 0.7; }
+
+.chat-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+#chat-log {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  scroll-behavior: smooth;
+}
+#chat-log::-webkit-scrollbar { width: 3px; }
+#chat-log::-webkit-scrollbar-track { background: transparent; }
+#chat-log::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
+
+.chat-msg {
+  font-size: 0.78rem;
+  line-height: 1.4;
+  padding: 4px 6px;
+  border-radius: 6px;
+  word-break: break-word;
+}
+.chat-msg .who { font-weight: 800; margin-right: 4px; }
+.chat-msg.system { color: var(--text-muted); font-style: italic; background: rgba(255,255,255,0.03); }
+.chat-msg.correct { background: rgba(0,184,148,0.15); border-left: 3px solid #00b894; }
+.chat-msg.correct .who { color: #00b894; }
+.chat-msg.wrong .who { color: var(--text-muted); }
+
+.chat-input-area {
+  padding: 8px;
+  border-top: 1px solid rgba(255,255,255,0.07);
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.chat-input-area input {
+  flex: 1;
+  font-size: 0.85rem;
+  padding: 8px 10px;
+  min-width: 0;
+}
+.chat-input-area button {
+  background: var(--accent);
+  border: none;
+  border-radius: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  color: white;
+  font-weight: 800;
+  font-size: 0.85rem;
+  font-family: 'Nunito', sans-serif;
+  flex-shrink: 0;
+  transition: opacity 0.2s;
+}
+.chat-input-area button:hover { opacity: 0.8; }
+
+/* Canvas overlay for non-drawers */
+.canvas-overlay {
+  position: absolute;
+  inset: 0;
+  background: transparent;
+  z-index: 5;
+  display: none;
+}
+
+/* ===== OVERLAY MESSAGES ===== */
+.overlay-msg {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0,0,0,0.85);
+  display: none;
+}
+.overlay-msg.active { display: flex; }
+
+.overlay-card {
+  background: var(--card);
+  border-radius: 20px;
+  padding: 32px;
+  text-align: center;
+  max-width: 380px;
+  width: 90%;
+  border: 1px solid rgba(255,255,255,0.1);
+  box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  animation: popIn 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+@keyframes popIn {
+  0% { transform: scale(0.7); opacity: 0; }
+  100% { transform: scale(1); opacity: 1; }
+}
+.overlay-card .emoji { font-size: 3.5rem; margin-bottom: 12px; }
+.overlay-card h2 { font-family: 'Fredoka One', cursive; font-size: 1.8rem; margin-bottom: 8px; }
+.overlay-card p { color: var(--text-muted); font-size: 0.95rem; margin-bottom: 6px; }
+.overlay-card .big { font-family: 'Fredoka One', cursive; font-size: 1.4rem; color: var(--accent2); }
+
+/* Score list */
+.score-list { width: 100%; margin: 12px 0; }
+.score-row {
+  display: flex;
+  align-items: center;
+  padding: 8px 12px;
+  border-radius: 8px;
+  gap: 8px;
+  background: rgba(255,255,255,0.04);
+  margin-bottom: 6px;
+}
+.score-row.first { background: rgba(245,166,35,0.15); border: 1px solid rgba(245,166,35,0.3); }
+.score-row .rank { font-family: 'Fredoka One', cursive; font-size: 1.2rem; width: 30px; }
+.score-row .sname { flex: 1; font-weight: 700; text-align: left; }
+.score-row .sscore { color: var(--accent2); font-weight: 800; }
+
+/* ===== MOBILE LAYOUT ===== */
+@media (max-width: 600px) {
+  .sidebar { width: 130px; }
+  .player-score-item .ava { display: none; }
+  .chat-msg .who { display: block; }
+  .draw-tools { padding: 6px 8px; gap: 5px; }
+  .color-swatch { width: 20px; height: 20px; }
+}
+
+@media (max-width: 450px) {
+  .sidebar { display: none; }
+  .mobile-chat-toggle {
+    display: flex !important;
+  }
+  .game-body { position: relative; }
+}
+
+.mobile-chat-toggle {
+  display: none;
+  position: fixed;
+  bottom: 90px;
+  right: 12px;
+  z-index: 50;
+}
+.mobile-chat-toggle button {
+  background: var(--accent);
+  border: none;
+  border-radius: 50%;
+  width: 48px; height: 48px;
+  font-size: 1.4rem;
+  cursor: pointer;
+  box-shadow: 0 4px 15px rgba(233,69,96,0.5);
+}
+
+.mobile-sidebar {
+  position: fixed;
+  bottom: 0; left: 0; right: 0;
+  height: 55vh;
+  background: var(--surface);
+  border-radius: 20px 20px 0 0;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  transform: translateY(100%);
+  transition: transform 0.3s cubic-bezier(0.34, 1.2, 0.64, 1);
+  border-top: 1px solid rgba(255,255,255,0.1);
+}
+.mobile-sidebar.open { transform: translateY(0); }
+.mobile-sidebar-drag {
+  width: 40px; height: 4px;
+  background: rgba(255,255,255,0.2);
+  border-radius: 2px;
+  margin: 8px auto;
+  cursor: pointer;
+}
+
+/* Connection status */
+#conn-status {
+  position: fixed;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0,0,0,0.8);
+  padding: 4px 14px;
+  border-radius: 20px;
+  font-size: 0.75rem;
+  z-index: 1000;
+  display: none;
+}
+#conn-status.show { display: block; }
+#conn-status.connecting { border: 1px solid var(--accent2); color: var(--accent2); }
+#conn-status.error { border: 1px solid var(--accent); color: var(--accent); }
+
+/* Notification toast */
+.toast {
+  position: fixed;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%) translateY(-60px);
+  background: var(--card);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 12px;
+  padding: 10px 20px;
+  font-weight: 700;
+  z-index: 1000;
+  transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+  white-space: nowrap;
+}
+.toast.show { transform: translateX(-50%) translateY(0); }
+
+/* Drawing word banner (for drawer) */
+.your-word-banner {
+  background: linear-gradient(135deg, rgba(245,166,35,0.2), rgba(233,69,96,0.2));
+  border: 1px solid rgba(245,166,35,0.3);
+  border-radius: 10px;
+  padding: 6px 14px;
+  text-align: center;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  flex-shrink: 0;
+  display: none;
+}
+.your-word-banner strong { color: var(--accent2); font-size: 1.1em; }
+</style>
+</head>
+<body>
+
+<!-- Connection Status -->
+<div id="conn-status"></div>
+<div class="toast" id="toast"></div>
+
+<!-- ======================== LOBBY SCREEN ======================== -->
+<div id="screen-lobby" class="screen active">
+  <div style="padding: 30px 20px 0; text-align: center;">
+    <h1 class="logo">🎨 GambarYuk!</h1>
+    <p style="color: var(--text-muted); margin-top: 8px; font-size: 0.9rem;">Tebak gambar bareng teman!</p>
+  </div>
+
+  <div class="lobby-card" style="margin: 0 auto;">
+    <h2>✏️ Buat Room Baru</h2>
+    <div class="input-group">
+      <input type="text" id="username-input" placeholder="Nama kamu..." maxlength="20" autocomplete="off">
+      <input type="text" id="server-url-input" placeholder="wss://your-worker.workers.dev" value="">
+    </div>
+    <button class="btn btn-primary" onclick="createAndJoinRoom()">🚀 Buat Room</button>
+
+    <div class="divider">atau</div>
+
+    <h2>🔗 Join Room</h2>
+    <div class="input-group">
+      <input type="text" id="join-code-input" placeholder="Kode Room (6 huruf)" maxlength="6" style="text-transform: uppercase; letter-spacing: 4px; text-align: center;" autocomplete="off">
+    </div>
+    <button class="btn btn-secondary" onclick="joinRoom()">🎮 Join Room</button>
+  </div>
+
+  <p style="text-align: center; font-size: 0.75rem; color: var(--text-muted); padding-bottom: 20px;">
+    Minimal 3 pemain · Maksimal 5 pemain
+  </p>
+</div>
+
+<!-- ======================== WAITING ROOM ======================== -->
+<div id="screen-waiting" class="screen">
+  <div style="padding: 20px 0 0; text-align: center;">
+    <h1 class="logo" style="font-size: 2rem;">🎨 GambarYuk!</h1>
+  </div>
+
+  <div class="waiting-card">
+    <div class="room-code">
+      <label>Kode Room</label>
+      <span class="code" id="room-code-display" onclick="copyCode()">------</span>
+      <div class="copy-hint">Tap untuk copy</div>
+    </div>
+
+    <p class="panel-title">Pemain (min 3, max 5)</p>
+    <div class="player-grid" id="player-slots"></div>
+
+    <p class="waiting-info" id="waiting-info">Menunggu pemain lain...</p>
+
+    <button class="btn btn-green" id="ready-btn" onclick="toggleReady()">✅ Siap!</button>
+    <div style="margin-top: 8px;"></div>
+    <button class="btn btn-danger" onclick="leaveRoom()">⬅ Keluar</button>
+  </div>
+</div>
+
+<!-- ======================== GAME SCREEN ======================== -->
+<div id="screen-game" class="screen">
+  <!-- Header -->
+  <div class="game-header">
+    <div class="timer-display">
+      <div class="timer-num" id="timer-num">--</div>
+      <div style="font-size: 0.6rem; color: var(--text-muted);">detik</div>
+    </div>
+
+    <div class="round-info">
+      <div class="round-text" id="round-text">Ronde 1</div>
+      <div class="drawer-text">Yang gambar: <span id="drawer-name-header">-</span></div>
+    </div>
+
+    <div style="text-align: center; min-width: 80px;">
+      <div class="word-display" id="word-hint-display">_ _ _ _</div>
+      <div id="word-length-info" style="font-size: 0.65rem; color: var(--text-muted);"></div>
+    </div>
+  </div>
+
+  <!-- Your word banner (drawer only) -->
+  <div class="your-word-banner" id="your-word-banner">
+    Gambar: <strong id="your-word-text">...</strong> — jangan bocor! 🤫
+  </div>
+
+  <!-- Body -->
+  <div class="game-body">
+    <!-- Canvas -->
+    <div class="canvas-area">
+      <canvas id="game-canvas"></canvas>
+      <div class="canvas-overlay" id="canvas-overlay"></div>
+
+      <!-- Draw Tools (drawer only) -->
+      <div class="draw-tools" id="draw-tools" style="display: none;">
+        <div class="color-picker-wrap" id="color-picker"></div>
+        <div class="size-picker" id="size-picker"></div>
+        <button class="tool-btn eraser" id="eraser-btn" onclick="toggleEraser()">🧹 Hapus</button>
+        <button class="tool-btn" onclick="clearCanvas()" style="margin-left: auto;">🗑️ Bersihkan</button>
+      </div>
+    </div>
+
+    <!-- Sidebar (desktop) -->
+    <div class="sidebar">
+      <div class="players-panel">
+        <div class="panel-title">Skor</div>
+        <div id="score-list-sidebar"></div>
+      </div>
+      <div class="chat-panel">
+        <div class="panel-title" style="padding: 8px 8px 0;">Chat / Jawab</div>
+        <div id="chat-log"></div>
+        <div class="chat-input-area">
+          <input type="text" id="chat-input" placeholder="Tebak..." autocomplete="off">
+          <button onclick="sendGuess()">➤</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Mobile Chat Toggle -->
+  <div class="mobile-chat-toggle">
+    <button onclick="toggleMobileChat()">💬</button>
+  </div>
+
+  <!-- Mobile Sidebar -->
+  <div class="mobile-sidebar" id="mobile-sidebar">
+    <div class="mobile-sidebar-drag" onclick="toggleMobileChat()"></div>
+    <div style="display: flex; flex-direction: column; flex: 1; overflow: hidden;">
+      <div id="score-list-mobile" style="padding: 8px 12px; border-bottom: 1px solid rgba(255,255,255,0.07); font-size: 0.8rem;"></div>
+      <div id="chat-log-mobile" style="flex:1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 4px;"></div>
+      <div class="chat-input-area">
+        <input type="text" id="chat-input-mobile" placeholder="Tebak..." autocomplete="off">
+        <button onclick="sendGuessMobile()">➤</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ======================== OVERLAYS ======================== -->
+<!-- Round End -->
+<div class="overlay-msg" id="overlay-round-end">
+  <div class="overlay-card">
+    <div class="emoji" id="ore-emoji">⏰</div>
+    <h2 id="ore-title">Waktu Habis!</h2>
+    <p id="ore-word"></p>
+    <div class="score-list" id="ore-scores"></div>
+    <p style="color: var(--text-muted); font-size: 0.8rem;">Ronde berikutnya dalam <span id="ore-countdown" style="color: var(--accent2); font-weight: 800;">5</span>s</p>
+  </div>
+</div>
+
+<!-- Game End -->
+<div class="overlay-msg" id="overlay-game-end">
+  <div class="overlay-card">
+    <div class="emoji">🏆</div>
+    <h2>Game Selesai!</h2>
+    <p class="big" id="oge-winner"></p>
+    <div class="score-list" id="oge-scores"></div>
+    <p style="color: var(--text-muted); font-size: 0.8rem; margin-top: 8px;">Kembali ke lobby dalam <span id="oge-countdown" style="color: var(--accent2);">10</span>s</p>
+  </div>
+</div>
+
+<!-- Countdown Start -->
+<div class="overlay-msg" id="overlay-starting">
+  <div class="overlay-card">
+    <div class="emoji">🎉</div>
+    <h2>Game Dimulai!</h2>
+    <div style="font-family: 'Fredoka One', cursive; font-size: 4rem; color: var(--accent);" id="start-countdown">3</div>
+  </div>
+</div>
+
+<script>
+// =====================================================
+// CONFIG
+// =====================================================
+let WS_URL = ''; // Set dari input
+let ws = null;
+let myClientId = null;
+let myUsername = '';
+let currentRoomId = '';
+let isDrawer = false;
+let isReady = false;
+let gamePhase = 'lobby';
+let currentWord = '';
+let players = [];
+let correctGuessers = new Set();
+
+const COLORS = ['#000000','#ffffff','#ff4444','#ff8c00','#ffd700','#7ed321','#00b894','#00ccc0','#4a90d9','#9b59b6','#e91e63','#795548','#607d8b'];
+const SIZES = [{ size: 3, label: '●' }, { size: 7, label: '●' }, { size: 14, label: '●' }, { size: 24, label: '●' }];
+
+let drawState = {
+  isDrawing: false,
+  color: '#000000',
+  size: 5,
+  isEraser: false,
+  lastX: 0, lastY: 0,
+};
+
+const AVATARS = ['🐱','🐶','🦊','🐼','🐨','🐸','🦁','🐯','🐺','🦄','🐙','🦋'];
+
+// =====================================================
+// CONNECTION
+// =====================================================
+function showConnStatus(msg, type) {
+  const el = document.getElementById('conn-status');
+  el.textContent = msg;
+  el.className = `show ${type}`;
+  if (type !== 'connecting') setTimeout(() => el.className = '', 3000);
+}
+
+function showToast(msg, duration = 2500) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), duration);
+}
+
+function connectWS(roomId, username) {
+  const url = document.getElementById('server-url-input').value.trim();
+  if (!url) {
+    alert('Masukkan URL Cloudflare Worker dulu!');
+    return false;
+  }
+
+  WS_URL = url;
+  const wsUrl = `${url.replace(/^http/, 'ws')}/room/${roomId}`;
+  showConnStatus('Connecting...', 'connecting');
+
+  ws = new WebSocket(wsUrl);
+
+  ws.onopen = () => {
+    showConnStatus('Connected!', 'ok');
+    ws.send(JSON.stringify({ type: 'set_username', username }));
+  };
+
+  ws.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data);
+      handleMessage(msg);
+    } catch(err) { console.error(err); }
+  };
+
+  ws.onclose = () => {
+    showConnStatus('Disconnected', 'error');
+    setTimeout(() => {
+      if (gamePhase !== 'lobby') {
+        alert('Koneksi terputus!');
+        showScreen('screen-lobby');
+      }
+    }, 1000);
+  };
+
+  ws.onerror = () => showConnStatus('Connection error', 'error');
+  return true;
+}
+
+function send(data) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(data));
+  }
+}
+
+// =====================================================
+// SERVER MESSAGE HANDLER
+// =====================================================
+function handleMessage(msg) {
+  switch (msg.type) {
+    case 'welcome':
+      myClientId = msg.clientId;
+      players = msg.players || [];
+      renderWaitingPlayers();
+      break;
+
+    case 'player_joined':
+    case 'player_left':
+    case 'player_ready':
+      players = msg.players || [];
+      renderWaitingPlayers();
+      if (gamePhase === 'drawing') renderScoreSidebar();
+      break;
+
+    case 'game_starting':
+      gamePhase = 'starting';
+      showOverlay('overlay-starting');
+      let cnt = msg.countdown || 3;
+      document.getElementById('start-countdown').textContent = cnt;
+      const cntInterval = setInterval(() => {
+        cnt--;
+        document.getElementById('start-countdown').textContent = cnt;
+        if (cnt <= 0) {
+          clearInterval(cntInterval);
+          hideOverlay('overlay-starting');
+          showScreen('screen-game');
+          resetCanvas();
+        }
+      }, 1000);
+      break;
+
+    case 'round_start_drawer':
+      isDrawer = true;
+      currentWord = msg.word;
+      gamePhase = 'drawing';
+      correctGuessers.clear();
+      setupRound({
+        round: msg.round,
+        maxRounds: msg.maxRounds,
+        drawerName: msg.drawerName,
+        isDrawer: true,
+        word: msg.word,
+        timeLeft: msg.timeLeft,
+      });
+      break;
+
+    case 'round_start_guesser':
+      isDrawer = false;
+      currentWord = '';
+      gamePhase = 'drawing';
+      correctGuessers.clear();
+      setupRound({
+        round: msg.round,
+        maxRounds: msg.maxRounds,
+        drawerName: msg.drawerName,
+        isDrawer: false,
+        hint: msg.hint,
+        wordLength: msg.wordLength,
+        timeLeft: msg.timeLeft,
+      });
+      break;
+
+    case 'draw':
+      if (!isDrawer) drawRemote(msg.data);
+      break;
+
+    case 'clear_canvas':
+      resetCanvas();
+      break;
+
+    case 'hint_update':
+      if (!isDrawer) {
+        document.getElementById('word-hint-display').textContent = formatHint(msg.hint);
+      }
+      break;
+
+    case 'timer':
+      updateTimer(msg.timeLeft);
+      break;
+
+    case 'correct_guess':
+      correctGuessers.add(msg.clientId);
+      addChatMsg(`✅ ${msg.username} menebak dengan benar! +${msg.points}`, 'correct');
+      if (msg.scores) updateScores(msg.scores);
+      players = players.map(p => ({ ...p, score: (msg.scores.find(s => s.clientId === p.clientId)?.score || p.score) }));
+      renderScoreSidebar();
+      break;
+
+    case 'wrong_guess':
+      if (msg.clientId !== myClientId) {
+        addChatMsg(msg.text, 'wrong', msg.username);
+      }
+      break;
+
+    case 'chat':
+      addChatMsg(msg.text, 'normal', msg.username);
+      break;
+
+    case 'round_end':
+      showRoundEnd(msg);
+      break;
+
+    case 'game_end':
+      showGameEnd(msg);
+      break;
+
+    case 'back_to_lobby':
+      players = msg.players || [];
+      gamePhase = 'lobby';
+      isReady = false;
+      hideOverlay('overlay-game-end');
+      showScreen('screen-waiting');
+      renderWaitingPlayers();
+      break;
+
+    case 'game_cancelled':
+      addChatMsg(`⚠️ ${msg.reason}`, 'system');
+      gamePhase = 'lobby';
+      showScreen('screen-waiting');
+      break;
+
+    case 'error':
+      showToast('⚠️ ' + msg.message);
+      break;
+
+    case 'pong':
+      // ping/pong
+      break;
+  }
+}
+
+// =====================================================
+// LOBBY & ROOM
+// =====================================================
+async function createAndJoinRoom() {
+  const username = document.getElementById('username-input').value.trim();
+  if (!username) { showToast('Masukkan nama dulu!'); return; }
+  const url = document.getElementById('server-url-input').value.trim();
+  if (!url) { showToast('Masukkan URL Worker dulu!'); return; }
+
+  try {
+    const res = await fetch(`${url}/create-room`);
+    const data = await res.json();
+    currentRoomId = data.roomId;
+  } catch(e) {
+    // Fallback: generate locally
+    currentRoomId = generateRoomId();
+  }
+
+  myUsername = username;
+  document.getElementById('room-code-display').textContent = currentRoomId;
+
+  if (connectWS(currentRoomId, username)) {
+    showScreen('screen-waiting');
+  }
+}
+
+function joinRoom() {
+  const username = document.getElementById('username-input').value.trim();
+  const code = document.getElementById('join-code-input').value.trim().toUpperCase();
+  if (!username) { showToast('Masukkan nama dulu!'); return; }
+  if (code.length < 4) { showToast('Masukkan kode room!'); return; }
+
+  myUsername = username;
+  currentRoomId = code;
+  document.getElementById('room-code-display').textContent = currentRoomId;
+
+  if (connectWS(currentRoomId, username)) {
+    showScreen('screen-waiting');
+  }
+}
+
+function leaveRoom() {
+  if (ws) ws.close();
+  showScreen('screen-lobby');
+}
+
+function copyCode() {
+  navigator.clipboard?.writeText(currentRoomId);
+  showToast('✅ Kode disalin!');
+}
+
+function generateRoomId() {
+  const c = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  return Array.from({length: 6}, () => c[Math.floor(Math.random() * c.length)]).join('');
+}
+
+function toggleReady() {
+  isReady = !isReady;
+  const btn = document.getElementById('ready-btn');
+  btn.textContent = isReady ? '❌ Batalkan' : '✅ Siap!';
+  btn.className = `btn ${isReady ? 'btn-danger' : 'btn-green'}`;
+  send({ type: 'set_ready', ready: isReady });
+}
+
+function renderWaitingPlayers() {
+  const container = document.getElementById('player-slots');
+  const slots = [];
+
+  for (let i = 0; i < 5; i++) {
+    const p = players[i];
+    const isMe = p?.clientId === myClientId;
+    const avatar = AVATARS[i % AVATARS.length];
+
+    if (p) {
+      slots.push(`
+        <div class="player-slot filled ${p.isReady ? 'ready' : ''}">
+          <div class="avatar" style="background: ${getPlayerColor(i)}20;">${avatar}</div>
+          <div class="info">
+            <div class="name">${p.username}${isMe ? ' (kamu)' : ''}</div>
+            <div class="status ${p.isReady ? 'ready' : ''}">${p.isReady ? '✅ Siap' : '⏳ Menunggu'}</div>
+          </div>
+        </div>
+      `);
+    } else {
+      slots.push(`
+        <div class="player-slot empty">
+          <div class="avatar" style="background: rgba(255,255,255,0.05);">👤</div>
+          <div class="info">
+            <div class="name">${i < 3 ? 'Slot wajib...' : 'Opsional'}</div>
+          </div>
+        </div>
+      `);
+    }
+  }
+
+  container.innerHTML = slots.join('');
+
+  const readyCount = players.filter(p => p.isReady).length;
+  const total = players.length;
+  const info = document.getElementById('waiting-info');
+
+  if (total < 3) {
+    info.textContent = `Butuh ${3 - total} pemain lagi untuk mulai`;
+  } else if (readyCount < total) {
+    info.textContent = `${readyCount}/${total} pemain siap`;
+  } else {
+    info.textContent = 'Semua siap! Memulai...';
+  }
+}
+
+// =====================================================
+// GAME SETUP
+// =====================================================
+function setupRound({ round, maxRounds, drawerName, isDrawer: amDrawer, word, hint, wordLength, timeLeft }) {
+  // Update header
+  document.getElementById('round-text').textContent = `Ronde ${round} / ${maxRounds}`;
+  document.getElementById('drawer-name-header').textContent = drawerName;
+  document.getElementById('timer-num').textContent = timeLeft;
+
+  resetCanvas();
+
+  const banner = document.getElementById('your-word-banner');
+  const drawTools = document.getElementById('draw-tools');
+  const overlay = document.getElementById('canvas-overlay');
+  const chatInput = document.getElementById('chat-input');
+  const chatInputM = document.getElementById('chat-input-mobile');
+
+  if (amDrawer) {
+    document.getElementById('word-hint-display').textContent = word.replace(/./g, '▮').replace(/ /g, ' ');
+    document.getElementById('word-length-info').textContent = '';
+    document.getElementById('your-word-text').textContent = word;
+    banner.style.display = 'block';
+    drawTools.style.display = 'flex';
+    overlay.style.display = 'none';
+    chatInput.placeholder = 'Chat (kamu yang gambar!)';
+    chatInput.disabled = true;
+    if (chatInputM) { chatInputM.placeholder = 'Kamu yang gambar!'; chatInputM.disabled = true; }
+  } else {
+    document.getElementById('word-hint-display').textContent = formatHint(hint || '_'.repeat(wordLength || 4));
+    document.getElementById('word-length-info').textContent = `${wordLength} huruf`;
+    banner.style.display = 'none';
+    drawTools.style.display = 'none';
+    overlay.style.display = 'block';
+    chatInput.placeholder = 'Ketik tebakanmu...';
+    chatInput.disabled = false;
+    if (chatInputM) { chatInputM.placeholder = 'Ketik tebakanmu...'; chatInputM.disabled = false; }
+  }
+
+  renderScoreSidebar();
+  clearChatLog();
+  addChatMsg(`🎨 ${drawerName} sedang menggambar sesuatu...`, 'system');
+}
+
+function formatHint(hint) {
+  return hint.split('').join(' ').replace(/_ /g, '_ ').trim();
+}
+
+function updateTimer(t) {
+  const el = document.getElementById('timer-num');
+  el.textContent = t;
+  el.className = `timer-num${t <= 10 ? ' urgent' : ''}`;
+}
+
+// =====================================================
+// CANVAS DRAWING
+// =====================================================
+function initCanvas() {
+  const canvas = document.getElementById('game-canvas');
+  const ctx = canvas.getContext('2d');
+
+  function resizeCanvas() {
+    const area = canvas.parentElement;
+    const toolsH = document.getElementById('draw-tools').offsetHeight || 0;
+    const headerH = document.querySelector('.game-header').offsetHeight || 0;
+    const bannerH = document.getElementById('your-word-banner').offsetHeight || 0;
+    canvas.width = area.clientWidth;
+    canvas.height = window.innerHeight - headerH - toolsH - bannerH;
+  }
+
+  window.addEventListener('resize', resizeCanvas);
+  resizeCanvas();
+
+  // Color swatches
+  const colorPicker = document.getElementById('color-picker');
+  COLORS.forEach(c => {
+    const sw = document.createElement('div');
+    sw.className = `color-swatch${c === drawState.color ? ' active' : ''}`;
+    sw.style.background = c;
+    if (c === '#ffffff') sw.style.border = '2px solid rgba(255,255,255,0.3)';
+    sw.onclick = () => {
+      drawState.color = c;
+      drawState.isEraser = false;
+      document.getElementById('eraser-btn').classList.remove('active');
+      document.querySelectorAll('.color-swatch').forEach(s => s.classList.remove('active'));
+      sw.classList.add('active');
+    };
+    colorPicker.appendChild(sw);
+  });
+
+  // Size buttons
+  const sizePicker = document.getElementById('size-picker');
+  SIZES.forEach((s, i) => {
+    const btn = document.createElement('button');
+    btn.className = `size-btn${i === 1 ? ' active' : ''}`;
+    btn.style.width = btn.style.height = `${12 + i * 6}px`;
+    btn.title = `Size ${s.size}`;
+    btn.onclick = () => {
+      drawState.size = s.size;
+      document.querySelectorAll('.size-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+    };
+    sizePicker.appendChild(btn);
+  });
+  drawState.size = SIZES[1].size;
+
+  // Mouse events
+  canvas.addEventListener('mousedown', (e) => {
+    if (!isDrawer) return;
+    drawState.isDrawing = true;
+    const pos = getPos(e, canvas);
+    drawState.lastX = pos.x;
+    drawState.lastY = pos.y;
+  });
+
+  canvas.addEventListener('mousemove', (e) => {
+    if (!drawState.isDrawing || !isDrawer) return;
+    const pos = getPos(e, canvas);
+    drawLine(ctx, drawState.lastX, drawState.lastY, pos.x, pos.y, drawState.color, drawState.size, drawState.isEraser);
+    const data = { x1: drawState.lastX, y1: drawState.lastY, x2: pos.x, y2: pos.y, color: drawState.color, size: drawState.size, eraser: drawState.isEraser };
+    send({ type: 'draw', data });
+    drawState.lastX = pos.x;
+    drawState.lastY = pos.y;
+  });
+
+  canvas.addEventListener('mouseup', () => drawState.isDrawing = false);
+  canvas.addEventListener('mouseleave', () => drawState.isDrawing = false);
+
+  // Touch events
+  canvas.addEventListener('touchstart', (e) => {
+    if (!isDrawer) return;
+    e.preventDefault();
+    drawState.isDrawing = true;
+    const pos = getPos(e.touches[0], canvas);
+    drawState.lastX = pos.x; drawState.lastY = pos.y;
+  }, { passive: false });
+
+  canvas.addEventListener('touchmove', (e) => {
+    if (!drawState.isDrawing || !isDrawer) return;
+    e.preventDefault();
+    const pos = getPos(e.touches[0], canvas);
+    drawLine(ctx, drawState.lastX, drawState.lastY, pos.x, pos.y, drawState.color, drawState.size, drawState.isEraser);
+    const data = { x1: drawState.lastX, y1: drawState.lastY, x2: pos.x, y2: pos.y, color: drawState.color, size: drawState.size, eraser: drawState.isEraser };
+    send({ type: 'draw', data });
+    drawState.lastX = pos.x; drawState.lastY = pos.y;
+  }, { passive: false });
+
+  canvas.addEventListener('touchend', () => drawState.isDrawing = false);
+}
+
+function getPos(e, canvas) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (e.clientX - rect.left) * (canvas.width / rect.width),
+    y: (e.clientY - rect.top) * (canvas.height / rect.height),
+  };
+}
+
+function drawLine(ctx, x1, y1, x2, y2, color, size, eraser) {
+  ctx.globalCompositeOperation = eraser ? 'destination-out' : 'source-over';
+  ctx.strokeStyle = eraser ? 'rgba(0,0,0,1)' : color;
+  ctx.lineWidth = size;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.beginPath();
+  ctx.moveTo(x1, y1);
+  ctx.lineTo(x2, y2);
+  ctx.stroke();
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+function drawRemote(data) {
+  const canvas = document.getElementById('game-canvas');
+  const ctx = canvas.getContext('2d');
+  drawLine(ctx, data.x1, data.y1, data.x2, data.y2, data.color, data.size, data.eraser);
+}
+
+function resetCanvas() {
+  const canvas = document.getElementById('game-canvas');
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = 'white';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+}
+
+function clearCanvas() {
+  resetCanvas();
+  send({ type: 'clear_canvas' });
+}
+
+function toggleEraser() {
+  drawState.isEraser = !drawState.isEraser;
+  document.getElementById('eraser-btn').classList.toggle('active', drawState.isEraser);
+}
+
+// =====================================================
+// CHAT & GUESS
+// =====================================================
+function sendGuess() {
+  const input = document.getElementById('chat-input');
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+
+  if (isDrawer) {
+    send({ type: 'chat', text });
+    addChatMsg(text, 'normal', myUsername);
+  } else {
+    send({ type: 'guess', text });
+    addChatMsg(text, 'mine', myUsername);
+  }
+}
+
+function sendGuessMobile() {
+  const input = document.getElementById('chat-input-mobile');
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+
+  if (isDrawer) {
+    send({ type: 'chat', text });
+    addChatMsg(text, 'normal', myUsername);
+  } else {
+    send({ type: 'guess', text });
+    addChatMsg(text, 'mine', myUsername);
+  }
+}
+
+document.getElementById('chat-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') sendGuess();
+});
+
+function addChatMsg(text, type = 'normal', username = '') {
+  const msg = document.createElement('div');
+  msg.className = `chat-msg ${type}`;
+  if (type === 'system') {
+    msg.textContent = text;
+  } else {
+    msg.innerHTML = `<span class="who">${username}:</span>${text}`;
+  }
+
+  [document.getElementById('chat-log'), document.getElementById('chat-log-mobile')].forEach(log => {
+    if (!log) return;
+    const clone = msg.cloneNode(true);
+    log.appendChild(clone);
+    log.scrollTop = log.scrollHeight;
+  });
+}
+
+function clearChatLog() {
+  document.getElementById('chat-log').innerHTML = '';
+  document.getElementById('chat-log-mobile').innerHTML = '';
+}
+
+// =====================================================
+// SCORE & PLAYERS
+// =====================================================
+function renderScoreSidebar() {
+  const sorted = [...players].sort((a, b) => (b.score || 0) - (a.score || 0));
+
+  const html = sorted.map((p, i) => {
+    const isDrawerP = p.clientId === (players.find(pp => pp.isDrawer)?.clientId);
+    const guessed = correctGuessers.has(p.clientId);
+    const avatar = AVATARS[players.indexOf(p) % AVATARS.length];
+    return `
+      <div class="player-score-item ${isDrawerP ? 'drawer' : ''} ${guessed ? 'guessed' : ''}">
+        <div class="ava" style="background: ${getPlayerColor(i)}20;">${avatar}</div>
+        <div class="pname">${p.username}</div>
+        <div class="pscore">${p.score || 0}</div>
+      </div>
+    `;
+  }).join('');
+
+  document.getElementById('score-list-sidebar').innerHTML = html;
+  document.getElementById('score-list-mobile').innerHTML = `<strong style="font-size:0.75rem; color: var(--text-muted);">SKOR</strong>` + html;
+}
+
+function updateScores(scores) {
+  players = players.map(p => {
+    const s = scores.find(sc => sc.clientId === p.clientId);
+    return s ? { ...p, score: s.score } : p;
+  });
+  renderScoreSidebar();
+}
+
+// =====================================================
+// ROUND / GAME END OVERLAYS
+// =====================================================
+let oreTimer = null;
+function showRoundEnd(msg) {
+  gamePhase = 'roundEnd';
+  hideOverlay('overlay-starting');
+
+  const emoji = msg.reason === 'all_guessed' ? '🎉' : msg.reason === 'drawer_left' ? '😢' : '⏰';
+  const title = msg.reason === 'all_guessed' ? 'Semua Menebak!' : msg.reason === 'drawer_left' ? 'Penggambar Pergi' : 'Waktu Habis!';
+
+  document.getElementById('ore-emoji').textContent = emoji;
+  document.getElementById('ore-title').textContent = title;
+  document.getElementById('ore-word').innerHTML = `Kata: <strong style="color: var(--accent2);">${msg.word}</strong>`;
+  
+  if (msg.scores) {
+    document.getElementById('ore-scores').innerHTML = msg.scores.slice(0, 5).map((s, i) => `
+      <div class="score-row ${i === 0 ? 'first' : ''}">
+        <div class="rank">${['🥇','🥈','🥉','4️⃣','5️⃣'][i]}</div>
+        <div class="sname">${s.username}</div>
+        <div class="sscore">${s.score}</div>
+      </div>
+    `).join('');
+  }
+
+  showOverlay('overlay-round-end');
+
+  let cnt = 5;
+  document.getElementById('ore-countdown').textContent = cnt;
+  if (oreTimer) clearInterval(oreTimer);
+  oreTimer = setInterval(() => {
+    cnt--;
+    document.getElementById('ore-countdown').textContent = cnt;
+    if (cnt <= 0) {
+      clearInterval(oreTimer);
+      hideOverlay('overlay-round-end');
+    }
+  }, 1000);
+}
+
+let ogeTimer = null;
+function showGameEnd(msg) {
+  hideOverlay('overlay-round-end');
+  
+  document.getElementById('oge-winner').textContent = msg.winner ? `🏆 ${msg.winner} Menang!` : 'Selesai!';
+  if (msg.scores) {
+    document.getElementById('oge-scores').innerHTML = msg.scores.map((s, i) => `
+      <div class="score-row ${i === 0 ? 'first' : ''}">
+        <div class="rank">${['🥇','🥈','🥉','4️⃣','5️⃣'][i] || `${i+1}.`}</div>
+        <div class="sname">${s.username}</div>
+        <div class="sscore">${s.score} poin</div>
+      </div>
+    `).join('');
+  }
+
+  showOverlay('overlay-game-end');
+
+  let cnt = 10;
+  if (ogeTimer) clearInterval(ogeTimer);
+  ogeTimer = setInterval(() => {
+    cnt--;
+    document.getElementById('oge-countdown').textContent = cnt;
+    if (cnt <= 0) clearInterval(ogeTimer);
+  }, 1000);
+}
+
+// =====================================================
+// MOBILE CHAT
+// =====================================================
+let mobileChatOpen = false;
+function toggleMobileChat() {
+  mobileChatOpen = !mobileChatOpen;
+  document.getElementById('mobile-sidebar').classList.toggle('open', mobileChatOpen);
+}
+
+// =====================================================
+// SCREENS & OVERLAYS
+// =====================================================
+function showScreen(id) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.getElementById(id)?.classList.add('active');
+  if (id === 'screen-game') {
+    setTimeout(() => initCanvas(), 100);
+  }
+}
+
+function showOverlay(id) {
+  document.getElementById(id)?.classList.add('active');
+}
+
+function hideOverlay(id) {
+  document.getElementById(id)?.classList.remove('active');
+}
+
+// =====================================================
+// UTILS
+// =====================================================
+function getPlayerColor(idx) {
+  const c = ['#e94560','#f5a623','#00d2d3','#00b894','#a29bfe','#fd79a8'];
+  return c[idx % c.length];
+}
+
+// Start game (from waiting room start button - handled by ready system)
+function startGame() {
+  send({ type: 'start_game' });
+}
+
+// Init
+document.getElementById('join-code-input').addEventListener('input', function() {
+  this.value = this.value.toUpperCase();
+});
+</script>
+</body>
+</html>
