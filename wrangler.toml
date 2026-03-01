@@ -10,6 +10,10 @@ class_name = "GameRoom"
 name = "QUEUE_MANAGER"
 class_name = "QueueManager"
 
+[[durable_objects.bindings]]
+name = "ROOM_REGISTRY"
+class_name = "RoomRegistry"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["GameRoom"]
@@ -17,3 +21,7 @@ new_sqlite_classes = ["GameRoom"]
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["QueueManager"]
+
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["RoomRegistry"]
