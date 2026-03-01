@@ -1,16 +1,17 @@
 // =============================================================================
 // CLOUDFLARE WORKER - Skribbl-style Drawing Game
-// Deploy ini sebagai Cloudflare Worker dengan Durable Objects enabled
+// Deploy sebagai Cloudflare Worker dengan Durable Objects enabled
+//
+// SETUP SECRET KEY:
+//   Cloudflare Dashboard → Workers → Settings → Variables → Add Secret
+//   Name: TURNSTILE_SECRET
+//   Value: (isi dengan secret key Turnstile kamu)
 // =============================================================================
-
-// Secret Key Cloudflare Turnstile (jangan disebarkan!)
-const TURNSTILE_SECRET = '0x4AAAAAACkPBqhrP1dPiEnb';
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // CORS headers
     const corsHeaders = {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -31,8 +32,6 @@ export default {
 
     // Route: Buat room baru — wajib lewat validasi Turnstile
     if (url.pathname === '/create-room') {
-
-      // Coba baca token CAPTCHA dari body (POST) atau query param (GET fallback)
       let captchaToken = null;
 
       if (request.method === 'POST') {
@@ -44,10 +43,18 @@ export default {
         captchaToken = url.searchParams.get('captcha');
       }
 
-      // Validasi token ke Cloudflare Turnstile
       if (!captchaToken) {
         return new Response(JSON.stringify({ error: 'CAPTCHA token tidak ditemukan' }), {
           status: 403,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      // ✅ Secret key dibaca dari env, BUKAN hardcoded
+      const secret = env.TURNSTILE_SECRET;
+      if (!secret) {
+        return new Response(JSON.stringify({ error: 'Server tidak terkonfigurasi dengan benar.' }), {
+          status: 500,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
       }
@@ -56,7 +63,7 @@ export default {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          secret: TURNSTILE_SECRET,
+          secret: secret,
           response: captchaToken,
           remoteip: request.headers.get('CF-Connecting-IP') || undefined,
         }),
@@ -74,7 +81,6 @@ export default {
         });
       }
 
-      // CAPTCHA valid — buat room
       const roomId = generateRoomId();
       return new Response(JSON.stringify({ roomId }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -106,7 +112,7 @@ const WORD_CATEGORIES = {
 
 const ALL_WORDS = Object.values(WORD_CATEGORIES).flat();
 
-const DRAW_TIME = 80; // seconds per round
+const DRAW_TIME = 80;
 const MAX_ROUNDS = 3;
 const MIN_PLAYERS = 3;
 const MAX_PLAYERS = 5;
@@ -116,20 +122,21 @@ export class GameRoom {
   constructor(state, env) {
     this.state = state;
     this.env = env;
-    this.sessions = new Map(); // clientId -> { ws, username, score, isReady }
+    this.sessions = new Map();
     this.gameState = {
-      phase: 'lobby', // lobby | drawing | roundEnd | gameEnd
+      phase: 'lobby',
       round: 0,
       maxRounds: MAX_ROUNDS,
       drawerId: null,
       currentWord: null,
       wordHint: null,
-      roundTimer: null,
       timeLeft: DRAW_TIME,
       correctGuessers: new Set(),
-      drawingData: [], // stroke history
+      drawingData: [],
       scores: {},
       roundWinners: [],
+      // Menyimpan posisi huruf yang sudah dibuka agar konsisten
+      revealedPositions: new Set(),
     };
     this.timerInterval = null;
   }
@@ -180,7 +187,6 @@ export class GameRoom {
       this.handleDisconnect(clientId);
     });
 
-    // Send welcome + current state
     this.send(clientId, {
       type: 'welcome',
       clientId,
@@ -188,7 +194,6 @@ export class GameRoom {
       players: this.getPlayerList(),
     });
 
-    // Notify others
     this.broadcast({
       type: 'player_joined',
       players: this.getPlayerList(),
@@ -200,56 +205,51 @@ export class GameRoom {
     const session = this.sessions.get(clientId);
     if (!session) return;
 
-    switch (msg.type) {
-      case 'set_username':
-        session.username = msg.username.slice(0, 20).trim() || session.username;
-        this.broadcast({ type: 'player_joined', players: this.getPlayerList(), playerCount: this.sessions.size });
-        break;
+    // ✅ Fix: pindahkan semua case ke blok if-else agar tidak ada masalah
+    //    `const` di dalam switch yang menyebabkan error di beberapa runtime
+    const type = msg.type;
 
-      case 'set_ready':
-        session.isReady = msg.ready;
-        this.broadcast({ type: 'player_ready', players: this.getPlayerList() });
-        this.checkStartGame();
-        break;
+    if (type === 'set_username') {
+      session.username = msg.username.slice(0, 20).trim() || session.username;
+      this.broadcast({ type: 'player_joined', players: this.getPlayerList(), playerCount: this.sessions.size });
 
-      case 'draw':
-        if (clientId !== this.gameState.drawerId) return;
-        if (this.gameState.phase !== 'drawing') return;
-        this.gameState.drawingData.push(msg.data);
-        this.broadcastExcept(clientId, { type: 'draw', data: msg.data });
-        break;
+    } else if (type === 'set_ready') {
+      session.isReady = msg.ready;
+      this.broadcast({ type: 'player_ready', players: this.getPlayerList() });
+      this.checkStartGame();
 
-      case 'clear_canvas':
-        if (clientId !== this.gameState.drawerId) return;
-        this.gameState.drawingData = [];
-        this.broadcast({ type: 'clear_canvas' });
-        break;
+    } else if (type === 'draw') {
+      if (clientId !== this.gameState.drawerId) return;
+      if (this.gameState.phase !== 'drawing') return;
+      this.gameState.drawingData.push(msg.data);
+      this.broadcastExcept(clientId, { type: 'draw', data: msg.data });
 
-      case 'guess':
-        this.handleGuess(clientId, msg.text);
-        break;
+    } else if (type === 'clear_canvas') {
+      if (clientId !== this.gameState.drawerId) return;
+      this.gameState.drawingData = [];
+      this.broadcast({ type: 'clear_canvas' });
 
-      case 'chat':
-        const sanitized = msg.text.slice(0, 200);
-        this.broadcast({
-          type: 'chat',
-          username: session.username,
-          text: sanitized,
-          clientId,
-        });
-        break;
+    } else if (type === 'guess') {
+      this.handleGuess(clientId, msg.text);
 
-      case 'start_game':
-        if (this.gameState.phase === 'lobby' && this.sessions.size >= MIN_PLAYERS) {
-          this.startGame();
-        } else if (this.sessions.size < MIN_PLAYERS) {
-          this.send(clientId, { type: 'error', message: `Butuh minimal ${MIN_PLAYERS} pemain!` });
-        }
-        break;
+    } else if (type === 'chat') {
+      const sanitized = msg.text.slice(0, 200);
+      this.broadcast({
+        type: 'chat',
+        username: session.username,
+        text: sanitized,
+        clientId,
+      });
 
-      case 'ping':
-        this.send(clientId, { type: 'pong', timestamp: msg.timestamp });
-        break;
+    } else if (type === 'start_game') {
+      if (this.gameState.phase === 'lobby' && this.sessions.size >= MIN_PLAYERS) {
+        this.startGame();
+      } else if (this.sessions.size < MIN_PLAYERS) {
+        this.send(clientId, { type: 'error', message: `Butuh minimal ${MIN_PLAYERS} pemain!` });
+      }
+
+    } else if (type === 'ping') {
+      this.send(clientId, { type: 'pong', timestamp: msg.timestamp });
     }
   }
 
@@ -335,6 +335,8 @@ export class GameRoom {
     this.gameState.drawingData = [];
     this.gameState.timeLeft = DRAW_TIME;
     this.gameState.roundWinners = [];
+    // ✅ Reset posisi hint yang sudah terbuka
+    this.gameState.revealedPositions = new Set();
 
     const playerIds = [...this.sessions.keys()];
     const drawerIndex = (this.gameState.round - 1) % playerIds.length;
@@ -342,7 +344,8 @@ export class GameRoom {
 
     const words = this.pickWords(3);
     this.gameState.currentWord = words[0];
-    this.gameState.wordHint = this.generateHint(this.gameState.currentWord, 0);
+    // ✅ Generate hint awal sekali, simpan posisi terbuka
+    this.gameState.wordHint = this.generateInitialHint(this.gameState.currentWord);
 
     this.gameState.phase = 'drawing';
 
@@ -372,20 +375,29 @@ export class GameRoom {
   startRoundTimer() {
     if (this.timerInterval) clearInterval(this.timerInterval);
 
+    // Waktu reveal: di 50% dan 25% sisa waktu
+    const revealAtElapsed = [
+      Math.floor(DRAW_TIME * 0.5),
+      Math.floor(DRAW_TIME * 0.75),
+    ];
+    let lastRevealCount = 0;
+
     this.timerInterval = setInterval(() => {
       this.gameState.timeLeft--;
-
-      const revealAt = [Math.floor(DRAW_TIME * 0.5), Math.floor(DRAW_TIME * 0.25)];
       const elapsed = DRAW_TIME - this.gameState.timeLeft;
-      const revealed = revealAt.filter(t => elapsed >= t).length;
-      const newHint = this.generateHint(this.gameState.currentWord, revealed);
+      const revealCount = revealAtElapsed.filter(t => elapsed >= t).length;
 
-      if (newHint !== this.gameState.wordHint) {
-        this.gameState.wordHint = newHint;
-        this.broadcastExcept(this.gameState.drawerId, {
-          type: 'hint_update',
-          hint: newHint,
-        });
+      // ✅ Hanya update hint jika jumlah reveal bertambah
+      if (revealCount > lastRevealCount) {
+        lastRevealCount = revealCount;
+        const newHint = this.revealMoreHint(this.gameState.currentWord, revealCount);
+        if (newHint !== this.gameState.wordHint) {
+          this.gameState.wordHint = newHint;
+          this.broadcastExcept(this.gameState.drawerId, {
+            type: 'hint_update',
+            hint: newHint,
+          });
+        }
       }
 
       this.broadcast({ type: 'timer', timeLeft: this.gameState.timeLeft });
@@ -449,7 +461,11 @@ export class GameRoom {
       this.endRound('drawer_left');
     }
 
-    if (this.sessions.size < MIN_PLAYERS && this.gameState.phase !== 'lobby' && this.gameState.phase !== 'gameEnd') {
+    if (
+      this.sessions.size < MIN_PLAYERS &&
+      this.gameState.phase !== 'lobby' &&
+      this.gameState.phase !== 'gameEnd'
+    ) {
       if (this.timerInterval) clearInterval(this.timerInterval);
       this.gameState.phase = 'lobby';
       this.broadcast({ type: 'game_cancelled', reason: 'Pemain terlalu sedikit', players: this.getPlayerList() });
@@ -461,19 +477,32 @@ export class GameRoom {
     return shuffled.slice(0, count);
   }
 
-  generateHint(word, revealCount) {
-    const chars = word.split('');
-    const positions = chars.map((c, i) => i).filter(i => chars[i] !== ' ');
-    const toReveal = new Set();
+  // ✅ Generate hint awal: semua tersembunyi (hanya spasi yang kelihatan)
+  generateInitialHint(word) {
+    this.gameState.revealedPositions = new Set();
+    return word.split('').map(c => c === ' ' ? ' ' : '_').join('');
+  }
 
-    for (let i = 0; i < revealCount && i < positions.length; i++) {
-      const idx = Math.floor(Math.random() * positions.length);
-      toReveal.add(positions[idx]);
+  // ✅ Reveal huruf secara bertahap — posisi yang sudah terbuka tidak berubah
+  revealMoreHint(word, totalRevealCount) {
+    const chars = word.split('');
+    const hiddenPositions = chars
+      .map((c, i) => i)
+      .filter(i => chars[i] !== ' ' && !this.gameState.revealedPositions.has(i));
+
+    // Hitung berapa huruf yang harus ditambah
+    const targetTotal = Math.floor(chars.filter(c => c !== ' ').length * totalRevealCount * 0.3);
+    const toAdd = Math.max(0, targetTotal - this.gameState.revealedPositions.size);
+
+    // Acak posisi yang belum terbuka dan ambil sejumlah toAdd
+    const shuffled = hiddenPositions.sort(() => Math.random() - 0.5);
+    for (let i = 0; i < toAdd && i < shuffled.length; i++) {
+      this.gameState.revealedPositions.add(shuffled[i]);
     }
 
     return chars.map((c, i) => {
       if (c === ' ') return ' ';
-      if (toReveal.has(i)) return c;
+      if (this.gameState.revealedPositions.has(i)) return c;
       return '_';
     }).join('');
   }
