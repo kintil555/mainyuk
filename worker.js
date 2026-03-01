@@ -371,6 +371,8 @@ export class GameRoom {
       roundWinners: [],
       // Menyimpan posisi huruf yang sudah dibuka agar konsisten
       revealedPositions: new Set(),
+      // Urutan pemain yang sudah di-shuffle untuk giliran drawer
+      playerOrder: [],
     };
     this.timerInterval = null;
   }
@@ -567,6 +569,14 @@ export class GameRoom {
       this.gameState.scores[id] = 0;
     }
 
+    // Acak urutan pemain sekali di awal game — ini yang menentukan giliran drawer
+    const allIds = [...this.sessions.keys()];
+    for (let i = allIds.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [allIds[i], allIds[j]] = [allIds[j], allIds[i]];
+    }
+    this.gameState.playerOrder = allIds;
+
     this.broadcast({ type: 'game_starting', countdown: 3 });
     setTimeout(() => this.nextRound(), 3000);
   }
@@ -586,7 +596,12 @@ export class GameRoom {
     this.gameState.currentWord = null; // drawer yang isi
     this.gameState.wordHint = null;
 
-    const playerIds = [...this.sessions.keys()];
+    // Pakai playerOrder yang sudah di-shuffle — bukan sessions.keys() yang selalu urut join
+    const playerIds = this.gameState.playerOrder.filter(id => this.sessions.has(id));
+    // Kalau ada pemain baru join setelah game mulai, tambahkan di akhir
+    for (const id of this.sessions.keys()) {
+      if (!playerIds.includes(id)) playerIds.push(id);
+    }
     const drawerIndex = (this.gameState.round - 1) % playerIds.length;
     this.gameState.drawerId = playerIds[drawerIndex];
     this.gameState.phase = 'drawing';
