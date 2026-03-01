@@ -12,7 +12,7 @@
 // CONFIG ANTRIAN
 // =============================================================================
 const QUEUE_CONFIG = {
-  MAX_CONCURRENT_CREATES: 5,   // Maks pembuatan room bersamaan tanpa antri
+  MAX_CONCURRENT_CREATES: 3,   // Maks pembuatan room bersamaan tanpa antri
   BASE_WAIT_PER_PERSON: 45,    // Detik tunggu per orang di depan (45 detik)
   MAX_WAIT_SECONDS: 240,       // Maks tunggu 4 menit
   QUEUE_EXPIRY_MS: 5 * 60 * 1000, // Entry antrian kedaluwarsa setelah 5 menit
