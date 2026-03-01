@@ -3,6 +3,9 @@
 // Deploy ini sebagai Cloudflare Worker dengan Durable Objects enabled
 // =============================================================================
 
+// Secret Key Cloudflare Turnstile (jangan disebarkan!)
+const TURNSTILE_SECRET = '0x4AAAAAACkPBqhrP1dPiEnb';
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -26,11 +29,55 @@ export default {
       return stub.fetch(request);
     }
 
-    // Route: Buat room baru atau join dengan room ID
+    // Route: Buat room baru — wajib lewat validasi Turnstile
     if (url.pathname === '/create-room') {
+
+      // Coba baca token CAPTCHA dari body (POST) atau query param (GET fallback)
+      let captchaToken = null;
+
+      if (request.method === 'POST') {
+        try {
+          const body = await request.json();
+          captchaToken = body.captcha || null;
+        } catch (_) {}
+      } else {
+        captchaToken = url.searchParams.get('captcha');
+      }
+
+      // Validasi token ke Cloudflare Turnstile
+      if (!captchaToken) {
+        return new Response(JSON.stringify({ error: 'CAPTCHA token tidak ditemukan' }), {
+          status: 403,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      const verifyRes = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          secret: TURNSTILE_SECRET,
+          response: captchaToken,
+          remoteip: request.headers.get('CF-Connecting-IP') || undefined,
+        }),
+      });
+
+      const verifyData = await verifyRes.json();
+
+      if (!verifyData.success) {
+        return new Response(JSON.stringify({
+          error: 'Verifikasi CAPTCHA gagal. Coba lagi.',
+          codes: verifyData['error-codes'] || [],
+        }), {
+          status: 403,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      // CAPTCHA valid — buat room
       const roomId = generateRoomId();
       return new Response(JSON.stringify({ roomId }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
     }
 
@@ -183,7 +230,6 @@ export class GameRoom {
         break;
 
       case 'chat':
-        // Regular chat (non-guess)
         const sanitized = msg.text.slice(0, 200);
         this.broadcast({
           type: 'chat',
@@ -218,7 +264,6 @@ export class GameRoom {
     const word = this.gameState.currentWord?.toLowerCase();
 
     if (guess === word) {
-      // Correct!
       this.gameState.correctGuessers.add(clientId);
       const timeBonus = Math.floor((this.gameState.timeLeft / DRAW_TIME) * SCORE_BASE);
       const points = SCORE_BASE + timeBonus;
@@ -226,7 +271,6 @@ export class GameRoom {
       session.score += points;
       this.gameState.scores[clientId] = session.score;
 
-      // Give drawer points too
       const drawerSession = this.sessions.get(this.gameState.drawerId);
       if (drawerSession) {
         drawerSession.score += Math.floor(points * 0.5);
@@ -241,13 +285,11 @@ export class GameRoom {
         scores: this.getScores(),
       });
 
-      // Check if all non-drawers guessed
       const nonDrawers = [...this.sessions.keys()].filter(id => id !== this.gameState.drawerId);
       if (this.gameState.correctGuessers.size >= nonDrawers.length) {
         this.endRound('all_guessed');
       }
     } else {
-      // Wrong - broadcast as chat but masked
       this.broadcast({
         type: 'wrong_guess',
         username: session.username,
@@ -273,7 +315,6 @@ export class GameRoom {
     this.gameState.round = 0;
     this.gameState.phase = 'starting';
 
-    // Reset scores
     for (const [id, session] of this.sessions) {
       session.score = 0;
       this.gameState.scores[id] = 0;
@@ -295,19 +336,16 @@ export class GameRoom {
     this.gameState.timeLeft = DRAW_TIME;
     this.gameState.roundWinners = [];
 
-    // Pick drawer (rotate through players)
     const playerIds = [...this.sessions.keys()];
     const drawerIndex = (this.gameState.round - 1) % playerIds.length;
     this.gameState.drawerId = playerIds[drawerIndex];
 
-    // Pick random word
     const words = this.pickWords(3);
-    this.gameState.currentWord = words[0]; // auto-pick first, or could let drawer choose
+    this.gameState.currentWord = words[0];
     this.gameState.wordHint = this.generateHint(this.gameState.currentWord, 0);
 
     this.gameState.phase = 'drawing';
 
-    // Tell drawer the word
     this.send(this.gameState.drawerId, {
       type: 'round_start_drawer',
       round: this.gameState.round,
@@ -317,7 +355,6 @@ export class GameRoom {
       timeLeft: DRAW_TIME,
     });
 
-    // Tell others
     this.broadcastExcept(this.gameState.drawerId, {
       type: 'round_start_guesser',
       round: this.gameState.round,
@@ -329,7 +366,6 @@ export class GameRoom {
       timeLeft: DRAW_TIME,
     });
 
-    // Start timer
     this.startRoundTimer();
   }
 
@@ -339,7 +375,6 @@ export class GameRoom {
     this.timerInterval = setInterval(() => {
       this.gameState.timeLeft--;
 
-      // Reveal letters progressively
       const revealAt = [Math.floor(DRAW_TIME * 0.5), Math.floor(DRAW_TIME * 0.25)];
       const elapsed = DRAW_TIME - this.gameState.timeLeft;
       const revealed = revealAt.filter(t => elapsed >= t).length;
@@ -390,7 +425,6 @@ export class GameRoom {
       winner: winner?.username,
     });
 
-    // Reset to lobby after 10s
     setTimeout(() => {
       this.gameState.phase = 'lobby';
       for (const session of this.sessions.values()) {
@@ -411,12 +445,10 @@ export class GameRoom {
       playerCount: this.sessions.size,
     });
 
-    // If drawer left, end round
     if (this.gameState.phase === 'drawing' && this.gameState.drawerId === clientId) {
       this.endRound('drawer_left');
     }
 
-    // If too few players, back to lobby
     if (this.sessions.size < MIN_PLAYERS && this.gameState.phase !== 'lobby' && this.gameState.phase !== 'gameEnd') {
       if (this.timerInterval) clearInterval(this.timerInterval);
       this.gameState.phase = 'lobby';
@@ -434,7 +466,6 @@ export class GameRoom {
     const positions = chars.map((c, i) => i).filter(i => chars[i] !== ' ');
     const toReveal = new Set();
 
-    // Always reveal a few positions
     for (let i = 0; i < revealCount && i < positions.length; i++) {
       const idx = Math.floor(Math.random() * positions.length);
       toReveal.add(positions[idx]);
