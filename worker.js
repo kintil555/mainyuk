@@ -8,6 +8,16 @@
 //   Value: (isi dengan secret key Turnstile kamu)
 // =============================================================================
 
+// =============================================================================
+// CONFIG ANTRIAN
+// =============================================================================
+const QUEUE_CONFIG = {
+  MAX_CONCURRENT_CREATES: 5,   // Maks pembuatan room bersamaan tanpa antri
+  BASE_WAIT_PER_PERSON: 45,    // Detik tunggu per orang di depan (45 detik)
+  MAX_WAIT_SECONDS: 240,       // Maks tunggu 4 menit
+  QUEUE_EXPIRY_MS: 5 * 60 * 1000, // Entry antrian kedaluwarsa setelah 5 menit
+};
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -30,17 +40,37 @@ export default {
       return stub.fetch(request);
     }
 
-    // Route: Buat room baru — wajib lewat validasi Turnstile
+    // Route: Cek status antrian
+    if (url.pathname === '/queue-status') {
+      const queueId = url.searchParams.get('queueId');
+      if (!queueId) {
+        return new Response(JSON.stringify({ error: 'queueId diperlukan' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+      const queueStub = env.QUEUE_MANAGER.get(env.QUEUE_MANAGER.idFromName('global'));
+      const queueReq = new Request('https://internal/status?queueId=' + queueId, { method: 'GET' });
+      const queueRes = await queueStub.fetch(queueReq);
+      const data = await queueRes.json();
+      return new Response(JSON.stringify(data), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    // Route: Buat room baru — wajib lewat validasi Turnstile + sistem antri
     if (url.pathname === '/create-room') {
       let captchaToken = null;
+      let queueId = null;
 
       if (request.method === 'POST') {
         try {
           const body = await request.json();
           captchaToken = body.captcha || null;
+          queueId = body.queueId || null;
         } catch (_) {}
       } else {
         captchaToken = url.searchParams.get('captcha');
+        queueId = url.searchParams.get('queueId');
       }
 
       if (!captchaToken) {
@@ -50,46 +80,250 @@ export default {
         });
       }
 
-      // ✅ Secret key dibaca dari env, BUKAN hardcoded
+      // Verifikasi CAPTCHA
       const secret = env.TURNSTILE_SECRET;
-      if (!secret) {
-        return new Response(JSON.stringify({ error: 'Server tidak terkonfigurasi dengan benar.' }), {
-          status: 500,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      if (secret) {
+        const verifyRes = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            secret,
+            response: captchaToken,
+            remoteip: request.headers.get('CF-Connecting-IP') || undefined,
+          }),
         });
+        const verifyData = await verifyRes.json();
+        if (!verifyData.success) {
+          return new Response(JSON.stringify({
+            error: 'Verifikasi CAPTCHA gagal. Coba lagi.',
+            codes: verifyData['error-codes'] || [],
+          }), {
+            status: 403,
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
       }
 
-      const verifyRes = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+      // Cek antrian via QueueManager Durable Object
+      const queueStub = env.QUEUE_MANAGER.get(env.QUEUE_MANAGER.idFromName('global'));
+      const clientIp = request.headers.get('CF-Connecting-IP') || 'unknown';
+
+      const queueReq = new Request('https://internal/enqueue', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          secret: secret,
-          response: captchaToken,
-          remoteip: request.headers.get('CF-Connecting-IP') || undefined,
-        }),
+        body: JSON.stringify({ queueId, clientIp }),
       });
+      const queueRes = await queueStub.fetch(queueReq);
+      const queueData = await queueRes.json();
 
-      const verifyData = await verifyRes.json();
-
-      if (!verifyData.success) {
+      // Masih harus antri
+      if (queueData.status === 'queued') {
         return new Response(JSON.stringify({
-          error: 'Verifikasi CAPTCHA gagal. Coba lagi.',
-          codes: verifyData['error-codes'] || [],
+          queued: true,
+          queueId: queueData.queueId,
+          position: queueData.position,
+          estimatedWait: queueData.estimatedWait,
         }), {
-          status: 403,
+          status: 202,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
       }
 
-      const roomId = generateRoomId();
-      return new Response(JSON.stringify({ roomId }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      // Giliran sudah tiba — buat room
+      if (queueData.status === 'ready' || queueData.status === 'immediate') {
+        const roomId = generateRoomId();
+        // Beritahu QueueManager bahwa slot ini selesai
+        const doneReq = new Request('https://internal/done', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ queueId: queueData.queueId }),
+        });
+        await queueStub.fetch(doneReq);
+
+        return new Response(JSON.stringify({ roomId }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      return new Response(JSON.stringify({ error: 'Status antrian tidak dikenal' }), {
+        status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
     }
 
     return new Response('Skribbl Worker Active', { headers: corsHeaders });
   }
 };
+
+// =============================================================================
+// DURABLE OBJECT - Queue Manager
+// Mengelola antrian pembuatan room secara global
+// =============================================================================
+export class QueueManager {
+  constructor(state, env) {
+    this.state = state;
+    // queue: array of { queueId, clientIp, joinedAt, status: 'waiting'|'processing' }
+    this.queue = [];
+    this.activeCount = 0; // Berapa yang sedang diproses
+    this.initialized = false;
+  }
+
+  async ensureLoaded() {
+    if (this.initialized) return;
+    this.queue = (await this.state.storage.get('queue')) || [];
+    this.activeCount = (await this.state.storage.get('activeCount')) || 0;
+    this.initialized = true;
+    // Bersihkan entry kedaluwarsa saat load
+    this.cleanExpired();
+  }
+
+  async save() {
+    await this.state.storage.put('queue', this.queue);
+    await this.state.storage.put('activeCount', this.activeCount);
+  }
+
+  cleanExpired() {
+    const now = Date.now();
+    const before = this.queue.length;
+    this.queue = this.queue.filter(e => {
+      if (now - e.joinedAt > QUEUE_CONFIG.QUEUE_EXPIRY_MS) return false;
+      return true;
+    });
+    // Kurangi activeCount jika ada yang expire saat processing
+    const removed = before - this.queue.length;
+    if (removed > 0) {
+      this.activeCount = Math.max(0, this.activeCount - removed);
+    }
+  }
+
+  getWaitingQueue() {
+    return this.queue.filter(e => e.status === 'waiting');
+  }
+
+  getPosition(queueId) {
+    const waiting = this.getWaitingQueue();
+    return waiting.findIndex(e => e.queueId === queueId) + 1; // 1-based
+  }
+
+  calcEstimatedWait(position) {
+    // Setiap orang di depan = BASE_WAIT_PER_PERSON detik + sedikit variasi
+    const raw = position * QUEUE_CONFIG.BASE_WAIT_PER_PERSON;
+    return Math.min(raw, QUEUE_CONFIG.MAX_WAIT_SECONDS);
+  }
+
+  async fetch(request) {
+    await this.ensureLoaded();
+    this.cleanExpired();
+
+    const url = new URL(request.url);
+
+    // POST /enqueue — tambah ke antrian atau langsung jika kosong
+    if (url.pathname === '/enqueue') {
+      const body = await request.json();
+      let { queueId, clientIp } = body;
+
+      // Cek apakah queueId ini sudah ada di antrian
+      if (queueId) {
+        const existing = this.queue.find(e => e.queueId === queueId);
+        if (existing) {
+          if (existing.status === 'processing') {
+            // Giliran sudah tiba!
+            await this.save();
+            return new Response(JSON.stringify({ status: 'ready', queueId }), {
+              headers: { 'Content-Type': 'application/json' },
+            });
+          } else {
+            // Masih menunggu
+            const position = this.getPosition(queueId);
+            const estimatedWait = this.calcEstimatedWait(position);
+            await this.save();
+            return new Response(JSON.stringify({
+              status: 'queued', queueId, position, estimatedWait,
+            }), { headers: { 'Content-Type': 'application/json' } });
+          }
+        }
+      }
+
+      // Request baru
+      const newQueueId = queueId || crypto.randomUUID().slice(0, 12);
+
+      // Slot langsung tersedia?
+      if (this.activeCount < QUEUE_CONFIG.MAX_CONCURRENT_CREATES && this.getWaitingQueue().length === 0) {
+        this.activeCount++;
+        this.queue.push({ queueId: newQueueId, clientIp, joinedAt: Date.now(), status: 'processing' });
+        await this.save();
+        return new Response(JSON.stringify({ status: 'immediate', queueId: newQueueId }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      // Harus antri
+      this.queue.push({ queueId: newQueueId, clientIp, joinedAt: Date.now(), status: 'waiting' });
+
+      // Promosikan antrian yang bisa diproses
+      this.promoteQueue();
+
+      const position = this.getPosition(newQueueId);
+      const estimatedWait = this.calcEstimatedWait(position);
+
+      await this.save();
+      return new Response(JSON.stringify({
+        status: 'queued', queueId: newQueueId, position, estimatedWait,
+      }), { headers: { 'Content-Type': 'application/json' } });
+    }
+
+    // GET /status — cek status antrian
+    if (url.pathname === '/status') {
+      const queueId = url.searchParams.get('queueId');
+      const entry = this.queue.find(e => e.queueId === queueId);
+
+      if (!entry) {
+        return new Response(JSON.stringify({ status: 'not_found' }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      if (entry.status === 'processing') {
+        await this.save();
+        return new Response(JSON.stringify({ status: 'ready', queueId }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      const position = this.getPosition(queueId);
+      const estimatedWait = this.calcEstimatedWait(position);
+      await this.save();
+      return new Response(JSON.stringify({
+        status: 'queued', queueId, position, estimatedWait,
+        totalWaiting: this.getWaitingQueue().length,
+      }), { headers: { 'Content-Type': 'application/json' } });
+    }
+
+    // POST /done — tandai slot selesai, promosikan antrian berikutnya
+    if (url.pathname === '/done') {
+      const body = await request.json();
+      const { queueId } = body;
+      this.queue = this.queue.filter(e => e.queueId !== queueId);
+      this.activeCount = Math.max(0, this.activeCount - 1);
+      this.promoteQueue();
+      await this.save();
+      return new Response(JSON.stringify({ ok: true }), {
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    return new Response('QueueManager Active', { status: 200 });
+  }
+
+  promoteQueue() {
+    // Pindahkan entry 'waiting' ke 'processing' selama ada slot
+    const waiting = this.getWaitingQueue();
+    for (const entry of waiting) {
+      if (this.activeCount >= QUEUE_CONFIG.MAX_CONCURRENT_CREATES) break;
+      entry.status = 'processing';
+      this.activeCount++;
+    }
+  }
+}
 
 function generateRoomId() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
