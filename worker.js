@@ -1,5 +1,5 @@
 // =============================================================================
-// CLOUDFLARE WORKER - Skribbl-style Drawing Game
+// CLOUDFLARE WORKER - GambarYuk! Drawing Game
 // =============================================================================
 
 const QUEUE_CONFIG = {
@@ -12,130 +12,170 @@ const QUEUE_CONFIG = {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-
     const corsHeaders = {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type',
     };
+    if (request.method === 'OPTIONS') return new Response(null, { headers: corsHeaders });
 
-    if (request.method === 'OPTIONS') {
-      return new Response(null, { headers: corsHeaders });
-    }
-
+    // --- WebSocket room ---
     if (url.pathname.startsWith('/room/')) {
       const roomId = url.pathname.split('/')[2] || 'default';
       const id = env.GAME_ROOM.idFromName(roomId);
-      const stub = env.GAME_ROOM.get(id);
-      return stub.fetch(request);
+      return env.GAME_ROOM.get(id).fetch(request);
     }
 
+    // --- Queue status ---
     if (url.pathname === '/queue-status') {
       const queueId = url.searchParams.get('queueId');
-      if (!queueId) {
-        return new Response(JSON.stringify({ error: 'queueId diperlukan' }), {
-          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        });
-      }
-      const queueStub = env.QUEUE_MANAGER.get(env.QUEUE_MANAGER.idFromName('global'));
-      const queueReq = new Request('https://internal/status?queueId=' + queueId, { method: 'GET' });
-      const queueRes = await queueStub.fetch(queueReq);
-      const data = await queueRes.json();
-      return new Response(JSON.stringify(data), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      });
+      if (!queueId) return new Response(JSON.stringify({ error: 'queueId diperlukan' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      const stub = env.QUEUE_MANAGER.get(env.QUEUE_MANAGER.idFromName('global'));
+      const res = await stub.fetch(new Request('https://internal/status?queueId=' + queueId));
+      return new Response(await res.text(), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
-    if (url.pathname === '/create-room') {
-      let captchaToken = null;
-      let queueId = null;
+    // --- Room list (public rooms) ---
+    if (url.pathname === '/rooms') {
+      const stub = env.ROOM_REGISTRY.get(env.ROOM_REGISTRY.idFromName('global'));
+      const res = await stub.fetch(new Request('https://internal/list'));
+      return new Response(await res.text(), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
 
+    // --- Create room ---
+    if (url.pathname === '/create-room') {
+      let captchaToken = null, queueId = null, roomName = null, password = null;
       if (request.method === 'POST') {
-        try {
-          const body = await request.json();
-          captchaToken = body.captcha || null;
-          queueId = body.queueId || null;
-        } catch (_) {}
+        try { const b = await request.json(); captchaToken = b.captcha; queueId = b.queueId; roomName = b.roomName; password = b.password || null; } catch (_) {}
       } else {
         captchaToken = url.searchParams.get('captcha');
         queueId = url.searchParams.get('queueId');
       }
-
-      if (!captchaToken) {
-        return new Response(JSON.stringify({ error: 'CAPTCHA token tidak ditemukan' }), {
-          status: 403,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        });
-      }
+      if (!captchaToken) return new Response(JSON.stringify({ error: 'CAPTCHA token tidak ditemukan' }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
 
       const secret = env.TURNSTILE_SECRET;
       if (secret) {
-        const verifyRes = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            secret,
-            response: captchaToken,
-            remoteip: request.headers.get('CF-Connecting-IP') || undefined,
-          }),
+        const vr = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ secret, response: captchaToken, remoteip: request.headers.get('CF-Connecting-IP') || undefined }),
         });
-        const verifyData = await verifyRes.json();
-        if (!verifyData.success) {
-          return new Response(JSON.stringify({
-            error: 'Verifikasi CAPTCHA gagal. Coba lagi.',
-            codes: verifyData['error-codes'] || [],
-          }), {
-            status: 403,
-            headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-          });
-        }
+        const vd = await vr.json();
+        if (!vd.success) return new Response(JSON.stringify({ error: 'Verifikasi CAPTCHA gagal. Coba lagi.', codes: vd['error-codes'] || [] }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
 
       const queueStub = env.QUEUE_MANAGER.get(env.QUEUE_MANAGER.idFromName('global'));
       const clientIp = request.headers.get('CF-Connecting-IP') || 'unknown';
+      const qr = await queueStub.fetch(new Request('https://internal/enqueue', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ queueId, clientIp }) }));
+      const qd = await qr.json();
 
-      const queueReq = new Request('https://internal/enqueue', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ queueId, clientIp }),
-      });
-      const queueRes = await queueStub.fetch(queueReq);
-      const queueData = await queueRes.json();
+      if (qd.status === 'queued') return new Response(JSON.stringify({ queued: true, queueId: qd.queueId, position: qd.position, estimatedWait: qd.estimatedWait }), { status: 202, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
 
-      if (queueData.status === 'queued') {
-        return new Response(JSON.stringify({
-          queued: true,
-          queueId: queueData.queueId,
-          position: queueData.position,
-          estimatedWait: queueData.estimatedWait,
-        }), {
-          status: 202,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        });
-      }
-
-      if (queueData.status === 'ready' || queueData.status === 'immediate') {
+      if (qd.status === 'ready' || qd.status === 'immediate') {
         const roomId = generateRoomId();
-        const doneReq = new Request('https://internal/done', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ queueId: queueData.queueId }),
-        });
-        await queueStub.fetch(doneReq);
-
-        return new Response(JSON.stringify({ roomId }), {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        });
+        await queueStub.fetch(new Request('https://internal/done', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ queueId: qd.queueId }) }));
+        // Daftarkan room ke registry
+        const registry = env.ROOM_REGISTRY.get(env.ROOM_REGISTRY.idFromName('global'));
+        await registry.fetch(new Request('https://internal/register', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ roomId, roomName: roomName || ('Room ' + roomId), password: password || null }),
+        }));
+        return new Response(JSON.stringify({ roomId }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
-
-      return new Response(JSON.stringify({ error: 'Status antrian tidak dikenal' }), {
-        status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      });
+      return new Response(JSON.stringify({ error: 'Status antrian tidak dikenal' }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
-    return new Response('Skribbl Worker Active', { headers: corsHeaders });
+    // --- Update room info (dipanggil DO GameRoom) ---
+    if (url.pathname === '/room-update') {
+      if (request.method === 'POST') {
+        try {
+          const b = await request.json();
+          const registry = env.ROOM_REGISTRY.get(env.ROOM_REGISTRY.idFromName('global'));
+          await registry.fetch(new Request('https://internal/update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) }));
+        } catch (_) {}
+      }
+      return new Response('ok', { headers: corsHeaders });
+    }
+
+    return new Response('GambarYuk Worker Active', { headers: corsHeaders });
   }
 };
+
+// =============================================================================
+// DURABLE OBJECT - Room Registry
+// Menyimpan daftar room yang aktif (untuk room list)
+// =============================================================================
+export class RoomRegistry {
+  constructor(state) {
+    this.state = state;
+    this.rooms = new Map(); // roomId -> { roomName, password, playerCount, phase, createdAt }
+    this.initialized = false;
+  }
+
+  async ensureLoaded() {
+    if (this.initialized) return;
+    const stored = (await this.state.storage.get('rooms')) || [];
+    this.rooms = new Map(stored);
+    this.initialized = true;
+    this.cleanStale();
+  }
+
+  cleanStale() {
+    const now = Date.now();
+    for (const [id, r] of this.rooms) {
+      if (now - r.createdAt > 4 * 60 * 60 * 1000) this.rooms.delete(id); // hapus setelah 4 jam
+    }
+  }
+
+  async save() {
+    await this.state.storage.put('rooms', [...this.rooms.entries()]);
+  }
+
+  async fetch(request) {
+    await this.ensureLoaded();
+    const url = new URL(request.url);
+
+    if (url.pathname === '/list') {
+      const list = [...this.rooms.entries()]
+        .map(([id, r]) => ({ roomId: id, roomName: r.roomName, playerCount: r.playerCount || 0, maxPlayers: r.maxPlayers || 5, phase: r.phase || 'lobby', hasPassword: !!r.password, createdAt: r.createdAt }))
+        .filter(r => r.phase !== 'dead')
+        .sort((a, b) => b.createdAt - a.createdAt);
+      return new Response(JSON.stringify(list), { headers: { 'Content-Type': 'application/json' } });
+    }
+
+    if (url.pathname === '/register') {
+      const b = await request.json();
+      this.rooms.set(b.roomId, { roomName: b.roomName, password: b.password, playerCount: 0, maxPlayers: 5, phase: 'lobby', createdAt: Date.now() });
+      await this.save();
+      return new Response('ok');
+    }
+
+    if (url.pathname === '/update') {
+      const b = await request.json();
+      const r = this.rooms.get(b.roomId);
+      if (r) {
+        if (b.playerCount !== undefined) r.playerCount = b.playerCount;
+        if (b.phase !== undefined) r.phase = b.phase;
+        if (b.maxPlayers !== undefined) r.maxPlayers = b.maxPlayers;
+        if (b.dead) this.rooms.delete(b.roomId);
+        else this.rooms.set(b.roomId, r);
+        await this.save();
+      }
+      return new Response('ok');
+    }
+
+    // Verify password
+    if (url.pathname === '/verify-password') {
+      const b = await request.json();
+      const r = this.rooms.get(b.roomId);
+      if (!r) return new Response(JSON.stringify({ ok: false, error: 'Room tidak ditemukan' }), { headers: { 'Content-Type': 'application/json' } });
+      if (!r.password) return new Response(JSON.stringify({ ok: true }), { headers: { 'Content-Type': 'application/json' } });
+      const match = r.password === b.password;
+      return new Response(JSON.stringify({ ok: match, error: match ? null : 'Password salah!' }), { headers: { 'Content-Type': 'application/json' } });
+    }
+
+    return new Response('RoomRegistry Active');
+  }
+}
 
 // =============================================================================
 // DURABLE OBJECT - Queue Manager
@@ -164,129 +204,71 @@ export class QueueManager {
   cleanExpired() {
     const now = Date.now();
     const before = this.queue.length;
-    this.queue = this.queue.filter(e => {
-      if (now - e.joinedAt > QUEUE_CONFIG.QUEUE_EXPIRY_MS) return false;
-      return true;
-    });
+    this.queue = this.queue.filter(e => now - e.joinedAt <= QUEUE_CONFIG.QUEUE_EXPIRY_MS);
     const removed = before - this.queue.length;
-    if (removed > 0) {
-      this.activeCount = Math.max(0, this.activeCount - removed);
-    }
+    if (removed > 0) this.activeCount = Math.max(0, this.activeCount - removed);
   }
 
-  getWaitingQueue() {
-    return this.queue.filter(e => e.status === 'waiting');
-  }
-
-  getPosition(queueId) {
-    const waiting = this.getWaitingQueue();
-    return waiting.findIndex(e => e.queueId === queueId) + 1;
-  }
-
-  calcEstimatedWait(position) {
-    const raw = position * QUEUE_CONFIG.BASE_WAIT_PER_PERSON;
-    return Math.min(raw, QUEUE_CONFIG.MAX_WAIT_SECONDS);
-  }
+  getWaitingQueue() { return this.queue.filter(e => e.status === 'waiting'); }
+  getPosition(queueId) { return this.getWaitingQueue().findIndex(e => e.queueId === queueId) + 1; }
+  calcEstimatedWait(position) { return Math.min(position * QUEUE_CONFIG.BASE_WAIT_PER_PERSON, QUEUE_CONFIG.MAX_WAIT_SECONDS); }
 
   async fetch(request) {
     await this.ensureLoaded();
     this.cleanExpired();
-
     const url = new URL(request.url);
 
     if (url.pathname === '/enqueue') {
-      const body = await request.json();
-      let { queueId, clientIp } = body;
-
+      const { queueId, clientIp } = await request.json();
       if (queueId) {
         const existing = this.queue.find(e => e.queueId === queueId);
         if (existing) {
-          if (existing.status === 'processing') {
-            await this.save();
-            return new Response(JSON.stringify({ status: 'ready', queueId }), {
-              headers: { 'Content-Type': 'application/json' },
-            });
-          } else {
-            const position = this.getPosition(queueId);
-            const estimatedWait = this.calcEstimatedWait(position);
-            await this.save();
-            return new Response(JSON.stringify({
-              status: 'queued', queueId, position, estimatedWait,
-            }), { headers: { 'Content-Type': 'application/json' } });
-          }
+          if (existing.status === 'processing') { await this.save(); return new Response(JSON.stringify({ status: 'ready', queueId }), { headers: { 'Content-Type': 'application/json' } }); }
+          const position = this.getPosition(queueId);
+          await this.save();
+          return new Response(JSON.stringify({ status: 'queued', queueId, position, estimatedWait: this.calcEstimatedWait(position) }), { headers: { 'Content-Type': 'application/json' } });
         }
       }
-
-      const newQueueId = queueId || crypto.randomUUID().slice(0, 12);
-
+      const newId = queueId || crypto.randomUUID().slice(0, 12);
       if (this.activeCount < QUEUE_CONFIG.MAX_CONCURRENT_CREATES && this.getWaitingQueue().length === 0) {
         this.activeCount++;
-        this.queue.push({ queueId: newQueueId, clientIp, joinedAt: Date.now(), status: 'processing' });
+        this.queue.push({ queueId: newId, clientIp, joinedAt: Date.now(), status: 'processing' });
         await this.save();
-        return new Response(JSON.stringify({ status: 'immediate', queueId: newQueueId }), {
-          headers: { 'Content-Type': 'application/json' },
-        });
+        return new Response(JSON.stringify({ status: 'immediate', queueId: newId }), { headers: { 'Content-Type': 'application/json' } });
       }
-
-      this.queue.push({ queueId: newQueueId, clientIp, joinedAt: Date.now(), status: 'waiting' });
+      this.queue.push({ queueId: newId, clientIp, joinedAt: Date.now(), status: 'waiting' });
       this.promoteQueue();
-
-      const position = this.getPosition(newQueueId);
-      const estimatedWait = this.calcEstimatedWait(position);
-
+      const pos = this.getPosition(newId);
       await this.save();
-      return new Response(JSON.stringify({
-        status: 'queued', queueId: newQueueId, position, estimatedWait,
-      }), { headers: { 'Content-Type': 'application/json' } });
+      return new Response(JSON.stringify({ status: 'queued', queueId: newId, position: pos, estimatedWait: this.calcEstimatedWait(pos) }), { headers: { 'Content-Type': 'application/json' } });
     }
 
     if (url.pathname === '/status') {
       const queueId = url.searchParams.get('queueId');
       const entry = this.queue.find(e => e.queueId === queueId);
-
-      if (!entry) {
-        return new Response(JSON.stringify({ status: 'not_found' }), {
-          headers: { 'Content-Type': 'application/json' },
-        });
-      }
-
-      if (entry.status === 'processing') {
-        await this.save();
-        return new Response(JSON.stringify({ status: 'ready', queueId }), {
-          headers: { 'Content-Type': 'application/json' },
-        });
-      }
-
-      const position = this.getPosition(queueId);
-      const estimatedWait = this.calcEstimatedWait(position);
+      if (!entry) return new Response(JSON.stringify({ status: 'not_found' }), { headers: { 'Content-Type': 'application/json' } });
+      if (entry.status === 'processing') { await this.save(); return new Response(JSON.stringify({ status: 'ready', queueId }), { headers: { 'Content-Type': 'application/json' } }); }
+      const pos = this.getPosition(queueId);
       await this.save();
-      return new Response(JSON.stringify({
-        status: 'queued', queueId, position, estimatedWait,
-        totalWaiting: this.getWaitingQueue().length,
-      }), { headers: { 'Content-Type': 'application/json' } });
+      return new Response(JSON.stringify({ status: 'queued', queueId, position: pos, estimatedWait: this.calcEstimatedWait(pos), totalWaiting: this.getWaitingQueue().length }), { headers: { 'Content-Type': 'application/json' } });
     }
 
     if (url.pathname === '/done') {
-      const body = await request.json();
-      const { queueId } = body;
+      const { queueId } = await request.json();
       this.queue = this.queue.filter(e => e.queueId !== queueId);
       this.activeCount = Math.max(0, this.activeCount - 1);
       this.promoteQueue();
       await this.save();
-      return new Response(JSON.stringify({ ok: true }), {
-        headers: { 'Content-Type': 'application/json' },
-      });
+      return new Response(JSON.stringify({ ok: true }), { headers: { 'Content-Type': 'application/json' } });
     }
 
-    return new Response('QueueManager Active', { status: 200 });
+    return new Response('QueueManager Active');
   }
 
   promoteQueue() {
-    const waiting = this.getWaitingQueue();
-    for (const entry of waiting) {
+    for (const entry of this.getWaitingQueue()) {
       if (this.activeCount >= QUEUE_CONFIG.MAX_CONCURRENT_CREATES) break;
-      entry.status = 'processing';
-      this.activeCount++;
+      entry.status = 'processing'; this.activeCount++;
     }
   }
 }
@@ -301,7 +283,6 @@ function generateRoomId() {
 // =============================================================================
 // DURABLE OBJECT - Game Room State
 // =============================================================================
-
 const WORD_CATEGORIES = {
   animals: ['kucing', 'anjing', 'gajah', 'harimau', 'kelinci', 'buaya', 'penguin', 'lumba-lumba', 'jerapah', 'gorila', 'kuda nil', 'kanguru', 'koala', 'panda', 'singa'],
   food: ['pizza', 'sushi', 'rendang', 'bakso', 'mie goreng', 'nasi goreng', 'gado-gado', 'martabak', 'donat', 'es krim', 'burger', 'roti bakar', 'sate', 'pempek', 'gudeg'],
@@ -309,15 +290,8 @@ const WORD_CATEGORIES = {
   places: ['pantai', 'gunung', 'hutan', 'sekolah', 'rumah sakit', 'bandara', 'pasar', 'taman', 'museum', 'perpustakaan', 'masjid', 'stadion', 'pelabuhan', 'kebun binatang', 'mall'],
   actions: ['berlari', 'berenang', 'memasak', 'menari', 'melukis', 'memancing', 'berkebun', 'bermain bola', 'naik sepeda', 'membaca'],
 };
-
 const ALL_WORDS = Object.values(WORD_CATEGORIES).flat();
-
-const DRAW_TIME = 80;
-const MAX_ROUNDS = 3;
-const MIN_PLAYERS = 3;
-const MAX_PLAYERS = 5;
-const SCORE_BASE = 100;
-
+const DRAW_TIME = 80, MAX_ROUNDS = 3, MIN_PLAYERS = 3, MAX_PLAYERS = 5, SCORE_BASE = 100;
 const CONFIG_LIMITS = {
   drawTime: { min: 30, max: 180, default: 80 },
   maxRounds: { min: 1, max: 10, default: 3 },
@@ -330,102 +304,60 @@ export class GameRoom {
     this.env = env;
     this.sessions = new Map();
     this.hostId = null;
+    this.roomId = null; // set saat WS pertama connect
     this.gameState = {
-      phase: 'lobby',
-      round: 0,
-      maxRounds: MAX_ROUNDS,
-      drawerId: null,
-      currentWord: null,
-      wordHint: null,
-      timeLeft: DRAW_TIME,
-      correctGuessers: new Set(),
-      drawingData: [],
-      scores: {},
-      roundWinners: [],
-      revealedPositions: new Set(),
-      // ✅ playerOrder: urutan drawer yang sudah diacak saat startGame()
-      // Index ini yang dipakai nextRound(), bukan sessions.keys()
-      playerOrder: [],
-      config: {
-        drawTime: CONFIG_LIMITS.drawTime.default,
-        maxRounds: CONFIG_LIMITS.maxRounds.default,
-        maxPlayers: CONFIG_LIMITS.maxPlayers.default,
-      },
+      phase: 'lobby', round: 0, maxRounds: MAX_ROUNDS,
+      drawerId: null, currentWord: null, wordHint: null,
+      timeLeft: DRAW_TIME, correctGuessers: new Set(),
+      drawingData: [], scores: {}, roundWinners: [],
+      revealedPositions: new Set(), playerOrder: [],
+      config: { drawTime: CONFIG_LIMITS.drawTime.default, maxRounds: CONFIG_LIMITS.maxRounds.default, maxPlayers: CONFIG_LIMITS.maxPlayers.default },
     };
     this.timerInterval = null;
   }
 
   async fetch(request) {
-    if (request.headers.get('Upgrade') !== 'websocket') {
-      return new Response('Expected WebSocket', { status: 400 });
-    }
-
+    if (request.headers.get('Upgrade') !== 'websocket') return new Response('Expected WebSocket', { status: 400 });
+    // Ambil roomId dari URL
+    const url = new URL(request.url);
+    this.roomId = url.pathname.split('/')[2] || this.roomId;
     const [client, server] = Object.values(new WebSocketPair());
     this.handleSession(server, request);
+    return new Response(null, { status: 101, webSocket: client });
+  }
 
-    return new Response(null, {
-      status: 101,
-      webSocket: client,
-    });
+  async notifyRegistry(updates) {
+    if (!this.roomId || !this.env?.ROOM_REGISTRY) return;
+    try {
+      const registry = this.env.ROOM_REGISTRY.get(this.env.ROOM_REGISTRY.idFromName('global'));
+      await registry.fetch(new Request('https://internal/update', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ roomId: this.roomId, ...updates }),
+      }));
+    } catch (_) {}
   }
 
   handleSession(ws, request) {
     ws.accept();
-
     const clientId = crypto.randomUUID();
-    const session = {
-      ws,
-      clientId,
-      username: `Player_${clientId.slice(0, 4)}`,
-      score: 0,
-      isReady: false,
-      joinedAt: Date.now(),
-    };
-
+    const session = { ws, clientId, username: `Player_${clientId.slice(0, 4)}`, score: 0, isReady: false, joinedAt: Date.now() };
     this.sessions.set(clientId, session);
-
-    if (!this.hostId) {
-      this.hostId = clientId;
-    }
+    if (!this.hostId) this.hostId = clientId;
 
     ws.addEventListener('message', async (event) => {
-      try {
-        const msg = JSON.parse(event.data);
-        await this.handleMessage(clientId, msg);
-      } catch (e) {
-        console.error('Message error:', e);
-      }
+      try { await this.handleMessage(clientId, JSON.parse(event.data)); } catch (e) { console.error(e); }
     });
+    ws.addEventListener('close', () => this.handleDisconnect(clientId));
+    ws.addEventListener('error', () => this.handleDisconnect(clientId));
 
-    ws.addEventListener('close', () => {
-      this.handleDisconnect(clientId);
-    });
-
-    ws.addEventListener('error', () => {
-      this.handleDisconnect(clientId);
-    });
-
-    this.send(clientId, {
-      type: 'welcome',
-      clientId,
-      hostId: this.hostId,
-      gameState: this.getPublicGameState(),
-      players: this.getPlayerList(),
-      config: this.gameState.config,
-    });
-
-    this.broadcast({
-      type: 'player_joined',
-      players: this.getPlayerList(),
-      playerCount: this.sessions.size,
-      hostId: this.hostId,
-    }, clientId);
+    this.send(clientId, { type: 'welcome', clientId, hostId: this.hostId, gameState: this.getPublicGameState(), players: this.getPlayerList(), config: this.gameState.config });
+    this.broadcast({ type: 'player_joined', players: this.getPlayerList(), playerCount: this.sessions.size, hostId: this.hostId }, clientId);
+    this.notifyRegistry({ playerCount: this.sessions.size, phase: this.gameState.phase, maxPlayers: this.gameState.config.maxPlayers });
   }
 
   async handleMessage(clientId, msg) {
     const session = this.sessions.get(clientId);
     if (!session) return;
-
     const type = msg.type;
 
     if (type === 'set_username') {
@@ -433,21 +365,27 @@ export class GameRoom {
       this.broadcast({ type: 'player_joined', players: this.getPlayerList(), playerCount: this.sessions.size, hostId: this.hostId });
 
     } else if (type === 'set_config') {
+      if (clientId !== this.hostId || this.gameState.phase !== 'lobby') return;
+      const cfg = this.gameState.config;
+      if (msg.drawTime !== undefined) cfg.drawTime = Math.max(CONFIG_LIMITS.drawTime.min, Math.min(CONFIG_LIMITS.drawTime.max, parseInt(msg.drawTime) || cfg.drawTime));
+      if (msg.maxRounds !== undefined) cfg.maxRounds = Math.max(CONFIG_LIMITS.maxRounds.min, Math.min(CONFIG_LIMITS.maxRounds.max, parseInt(msg.maxRounds) || cfg.maxRounds));
+      if (msg.maxPlayers !== undefined) cfg.maxPlayers = Math.max(Math.max(CONFIG_LIMITS.maxPlayers.min, Math.min(CONFIG_LIMITS.maxPlayers.max, parseInt(msg.maxPlayers) || cfg.maxPlayers)), this.sessions.size);
+      this.broadcast({ type: 'config_update', config: cfg, hostId: this.hostId });
+      this.notifyRegistry({ maxPlayers: cfg.maxPlayers });
+
+    } else if (type === 'kick_player') {
+      // Host bisa kick pemain lain di lobby
       if (clientId !== this.hostId) return;
       if (this.gameState.phase !== 'lobby') return;
-
-      const cfg = this.gameState.config;
-      if (msg.drawTime !== undefined) {
-        cfg.drawTime = Math.max(CONFIG_LIMITS.drawTime.min, Math.min(CONFIG_LIMITS.drawTime.max, parseInt(msg.drawTime) || cfg.drawTime));
-      }
-      if (msg.maxRounds !== undefined) {
-        cfg.maxRounds = Math.max(CONFIG_LIMITS.maxRounds.min, Math.min(CONFIG_LIMITS.maxRounds.max, parseInt(msg.maxRounds) || cfg.maxRounds));
-      }
-      if (msg.maxPlayers !== undefined) {
-        const newMax = Math.max(CONFIG_LIMITS.maxPlayers.min, Math.min(CONFIG_LIMITS.maxPlayers.max, parseInt(msg.maxPlayers) || cfg.maxPlayers));
-        cfg.maxPlayers = Math.max(newMax, this.sessions.size);
-      }
-      this.broadcast({ type: 'config_update', config: cfg, hostId: this.hostId });
+      const targetId = msg.targetId;
+      if (!targetId || targetId === clientId) return;
+      const target = this.sessions.get(targetId);
+      if (!target) return;
+      this.send(targetId, { type: 'kicked', reason: 'Kamu di-kick oleh host.' });
+      try { target.ws.close(1000, 'Kicked'); } catch (_) {}
+      this.sessions.delete(targetId);
+      this.broadcast({ type: 'player_left', clientId: targetId, players: this.getPlayerList(), playerCount: this.sessions.size, hostId: this.hostId });
+      this.notifyRegistry({ playerCount: this.sessions.size });
 
     } else if (type === 'set_ready') {
       session.isReady = msg.ready;
@@ -455,8 +393,7 @@ export class GameRoom {
       this.checkStartGame();
 
     } else if (type === 'draw') {
-      if (clientId !== this.gameState.drawerId) return;
-      if (this.gameState.phase !== 'drawing') return;
+      if (clientId !== this.gameState.drawerId || this.gameState.phase !== 'drawing') return;
       this.gameState.drawingData.push(msg.data);
       this.broadcastExcept(clientId, { type: 'draw', data: msg.data });
 
@@ -466,23 +403,16 @@ export class GameRoom {
       this.broadcast({ type: 'clear_canvas' });
 
     } else if (type === 'set_word') {
-      if (clientId !== this.gameState.drawerId) return;
-      if (this.gameState.phase !== 'drawing') return;
-      if (this.gameState.currentWord) return;
+      if (clientId !== this.gameState.drawerId || this.gameState.phase !== 'drawing' || this.gameState.currentWord) return;
       const word = (msg.word || '').toLowerCase().trim().replace(/[^a-z0-9 ]/gi, '').slice(0, 30);
       if (!word || word.length < 2) return;
       this.gameState.currentWord = word;
       this.gameState.wordHint = this.buildSecondLetterHint(word);
-      this.broadcastExcept(this.gameState.drawerId, {
-        type: 'hint_update',
-        hint: this.gameState.wordHint,
-        wordLength: word.length,
-      });
+      this.broadcastExcept(this.gameState.drawerId, { type: 'hint_update', hint: this.gameState.wordHint, wordLength: word.length });
       this.startRoundTimer();
 
     } else if (type === 'approve_guess') {
-      if (clientId !== this.gameState.drawerId) return;
-      if (this.gameState.phase !== 'drawing') return;
+      if (clientId !== this.gameState.drawerId || this.gameState.phase !== 'drawing') return;
       const targetId = msg.clientId;
       if (!targetId || this.gameState.correctGuessers.has(targetId)) return;
       const targetSession = this.sessions.get(targetId);
@@ -493,35 +423,18 @@ export class GameRoom {
       targetSession.score += points;
       this.gameState.scores[targetId] = targetSession.score;
       const drawerSession = this.sessions.get(this.gameState.drawerId);
-      if (drawerSession) {
-        drawerSession.score += Math.floor(points * 0.5);
-        this.gameState.scores[this.gameState.drawerId] = drawerSession.score;
-      }
+      if (drawerSession) { drawerSession.score += Math.floor(points * 0.5); this.gameState.scores[this.gameState.drawerId] = drawerSession.score; }
       this.broadcast({ type: 'correct_guess', clientId: targetId, username: targetSession.username, points, scores: this.getScores() });
       const nonDrawers = [...this.sessions.keys()].filter(id => id !== this.gameState.drawerId);
-      if (this.gameState.correctGuessers.size >= nonDrawers.length) {
-        this.endRound('all_guessed');
-      }
+      if (this.gameState.correctGuessers.size >= nonDrawers.length) this.endRound('all_guessed');
 
     } else if (type === 'guess') {
       this.handleGuess(clientId, msg.text);
-
     } else if (type === 'chat') {
-      const sanitized = msg.text.slice(0, 200);
-      this.broadcast({
-        type: 'chat',
-        username: session.username,
-        text: sanitized,
-        clientId,
-      });
-
+      this.broadcast({ type: 'chat', username: session.username, text: msg.text.slice(0, 200), clientId });
     } else if (type === 'start_game') {
-      if (this.gameState.phase === 'lobby' && this.sessions.size >= MIN_PLAYERS) {
-        this.startGame();
-      } else if (this.sessions.size < MIN_PLAYERS) {
-        this.send(clientId, { type: 'error', message: `Butuh minimal ${MIN_PLAYERS} pemain!` });
-      }
-
+      if (this.gameState.phase === 'lobby' && this.sessions.size >= MIN_PLAYERS) this.startGame();
+      else if (this.sessions.size < MIN_PLAYERS) this.send(clientId, { type: 'error', message: `Butuh minimal ${MIN_PLAYERS} pemain!` });
     } else if (type === 'ping') {
       this.send(clientId, { type: 'pong', timestamp: msg.timestamp });
     }
@@ -529,324 +442,119 @@ export class GameRoom {
 
   handleGuess(clientId, text) {
     const session = this.sessions.get(clientId);
-    if (!session) return;
-    if (this.gameState.phase !== 'drawing') return;
-    if (clientId === this.gameState.drawerId) return;
-    if (this.gameState.correctGuessers.has(clientId)) return;
-    if (!this.gameState.currentWord) return;
-    this.broadcast({
-      type: 'wrong_guess',
-      username: session.username,
-      text: text.trim().slice(0, 100),
-      clientId,
-    });
+    if (!session || this.gameState.phase !== 'drawing' || clientId === this.gameState.drawerId || this.gameState.correctGuessers.has(clientId) || !this.gameState.currentWord) return;
+    this.broadcast({ type: 'wrong_guess', username: session.username, text: text.trim().slice(0, 100), clientId });
   }
 
   checkStartGame() {
     const players = [...this.sessions.values()];
-    const readyCount = players.filter(p => p.isReady).length;
-    const totalCount = players.length;
-
-    if (totalCount >= MIN_PLAYERS && readyCount === totalCount) {
-      this.startGame();
-    }
+    if (players.length >= MIN_PLAYERS && players.every(p => p.isReady)) this.startGame();
   }
 
   startGame() {
     if (this.gameState.phase !== 'lobby' && this.gameState.phase !== 'gameEnd') return;
-
-    this.gameState.round = 0;
-    this.gameState.phase = 'starting';
+    this.gameState.round = 0; this.gameState.phase = 'starting';
     this.gameState.maxRounds = this.gameState.config.maxRounds;
-
-    for (const [id, session] of this.sessions) {
-      session.score = 0;
-      this.gameState.scores[id] = 0;
-    }
-
-    // ✅ Buat urutan drawer yang benar-benar acak:
-    //    - Ambil semua pemain yang ada
-    //    - Fisher-Yates shuffle
-    //    - Simpan ke playerOrder — inilah urutan giliran menggambar sepanjang game
+    for (const [id, s] of this.sessions) { s.score = 0; this.gameState.scores[id] = 0; }
     const allIds = [...this.sessions.keys()];
-    for (let i = allIds.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [allIds[i], allIds[j]] = [allIds[j], allIds[i]];
-    }
+    for (let i = allIds.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [allIds[i], allIds[j]] = [allIds[j], allIds[i]]; }
     this.gameState.playerOrder = allIds;
-
-    // Kirim playerOrder ke semua client agar tahu urutan giliran
-    this.broadcast({
-      type: 'game_starting',
-      countdown: 3,
-      playerOrder: allIds.map(id => ({
-        clientId: id,
-        username: this.sessions.get(id)?.username,
-      })),
-    });
-
+    this.broadcast({ type: 'game_starting', countdown: 3, playerOrder: allIds.map(id => ({ clientId: id, username: this.sessions.get(id)?.username })) });
+    this.notifyRegistry({ phase: 'playing' });
     setTimeout(() => this.nextRound(), 3000);
   }
 
   nextRound() {
-    const totalRounds = this.gameState.maxRounds * this.gameState.playerOrder.length;
-    if (this.gameState.round >= totalRounds) {
-      this.endGame();
-      return;
-    }
-
+    const total = this.gameState.maxRounds * this.gameState.playerOrder.length;
+    if (this.gameState.round >= total) { this.endGame(); return; }
     this.gameState.round++;
-    this.gameState.correctGuessers = new Set();
-    this.gameState.drawingData = [];
-    this.gameState.timeLeft = this.gameState.config.drawTime;
-    this.gameState.roundWinners = [];
-    this.gameState.revealedPositions = new Set();
-    this.gameState.currentWord = null;
-    this.gameState.wordHint = null;
-
-    // ✅ PERBAIKAN UTAMA:
-    //    Gunakan playerOrder (urutan acak dari startGame) bukan sessions.keys()
-    //    Kalau ada pemain yang disconnect, skip dan cari yang masih aktif
+    this.gameState.correctGuessers = new Set(); this.gameState.drawingData = []; this.gameState.timeLeft = this.gameState.config.drawTime;
+    this.gameState.roundWinners = []; this.gameState.revealedPositions = new Set(); this.gameState.currentWord = null; this.gameState.wordHint = null;
     const orderLen = this.gameState.playerOrder.length;
-    const roundIdx  = (this.gameState.round - 1) % orderLen;
-
-    // Cari drawer di urutan ini yang masih terhubung
-    // Jika disconnect, geser ke slot berikutnya dalam playerOrder
+    const roundIdx = (this.gameState.round - 1) % orderLen;
     let drawerId = null;
-    for (let attempt = 0; attempt < orderLen; attempt++) {
-      const candidateIdx = (roundIdx + attempt) % orderLen;
-      const candidateId  = this.gameState.playerOrder[candidateIdx];
-      if (this.sessions.has(candidateId)) {
-        drawerId = candidateId;
-        break;
-      }
+    for (let a = 0; a < orderLen; a++) {
+      const cid = this.gameState.playerOrder[(roundIdx + a) % orderLen];
+      if (this.sessions.has(cid)) { drawerId = cid; break; }
     }
-
-    // Tidak ada pemain yang aktif sama sekali (edge case)
-    if (!drawerId) {
-      this.endGame();
-      return;
-    }
-
-    this.gameState.drawerId = drawerId;
-    this.gameState.phase = 'drawing';
-
+    if (!drawerId) { this.endGame(); return; }
+    this.gameState.drawerId = drawerId; this.gameState.phase = 'drawing';
     const drawerName = this.sessions.get(drawerId)?.username;
-    const totalRoundsDisplay = this.gameState.maxRounds * this.gameState.playerOrder.length;
-
-    // Kirim ke drawer
-    this.send(drawerId, {
-      type: 'round_start_drawer',
-      round: this.gameState.round,
-      maxRounds: totalRoundsDisplay,
-      drawerName,
-      timeLeft: this.gameState.config.drawTime,
-    });
-
-    // Kirim ke guesser
-    this.broadcastExcept(drawerId, {
-      type: 'round_start_guesser',
-      round: this.gameState.round,
-      maxRounds: totalRoundsDisplay,
-      drawerId,
-      drawerName,
-      hint: '____',
-      wordLength: 0,
-      timeLeft: this.gameState.config.drawTime,
-    });
+    const totalDisplay = this.gameState.maxRounds * this.gameState.playerOrder.length;
+    this.send(drawerId, { type: 'round_start_drawer', round: this.gameState.round, maxRounds: totalDisplay, drawerName, timeLeft: this.gameState.config.drawTime });
+    this.broadcastExcept(drawerId, { type: 'round_start_guesser', round: this.gameState.round, maxRounds: totalDisplay, drawerId, drawerName, hint: '____', wordLength: 0, timeLeft: this.gameState.config.drawTime });
   }
 
-  buildSecondLetterHint(word) {
-    return word.split('').map((c, i) => {
-      if (c === ' ') return ' ';
-      return i === 1 ? c : '_';
-    }).join('');
-  }
+  buildSecondLetterHint(word) { return word.split('').map((c, i) => c === ' ' ? ' ' : i === 1 ? c : '_').join(''); }
 
   startRoundTimer() {
     if (this.timerInterval) clearInterval(this.timerInterval);
-
     const drawTime = this.gameState.config.drawTime;
-    const revealAtElapsed = [
-      Math.floor(drawTime * 0.5),
-      Math.floor(drawTime * 0.75),
-    ];
-    let lastRevealCount = 0;
-
+    const revealAt = [Math.floor(drawTime * 0.5), Math.floor(drawTime * 0.75)];
+    let lastReveal = 0;
     this.timerInterval = setInterval(() => {
       this.gameState.timeLeft--;
       const elapsed = drawTime - this.gameState.timeLeft;
-      const revealCount = revealAtElapsed.filter(t => elapsed >= t).length;
-
-      if (revealCount > lastRevealCount) {
-        lastRevealCount = revealCount;
-        const newHint = this.revealMoreHint(this.gameState.currentWord, revealCount);
-        if (newHint !== this.gameState.wordHint) {
-          this.gameState.wordHint = newHint;
-          this.broadcastExcept(this.gameState.drawerId, {
-            type: 'hint_update',
-            hint: newHint,
-          });
-        }
+      const rc = revealAt.filter(t => elapsed >= t).length;
+      if (rc > lastReveal) {
+        lastReveal = rc;
+        const nh = this.revealMoreHint(this.gameState.currentWord, rc);
+        if (nh !== this.gameState.wordHint) { this.gameState.wordHint = nh; this.broadcastExcept(this.gameState.drawerId, { type: 'hint_update', hint: nh }); }
       }
-
       this.broadcast({ type: 'timer', timeLeft: this.gameState.timeLeft });
-
-      if (this.gameState.timeLeft <= 0) {
-        clearInterval(this.timerInterval);
-        this.endRound('time_up');
-      }
+      if (this.gameState.timeLeft <= 0) { clearInterval(this.timerInterval); this.endRound('time_up'); }
     }, 1000);
   }
 
   endRound(reason) {
     if (this.timerInterval) clearInterval(this.timerInterval);
     this.gameState.phase = 'roundEnd';
-
-    this.broadcast({
-      type: 'round_end',
-      reason,
-      word: this.gameState.currentWord,
-      scores: this.getScores(),
-      round: this.gameState.round,
-    });
-
+    this.broadcast({ type: 'round_end', reason, word: this.gameState.currentWord, scores: this.getScores(), round: this.gameState.round });
     setTimeout(() => this.nextRound(), 5000);
   }
 
   endGame() {
     if (this.timerInterval) clearInterval(this.timerInterval);
     this.gameState.phase = 'gameEnd';
-
     const finalScores = this.getScores();
-    const winner = finalScores[0];
-
-    this.broadcast({
-      type: 'game_end',
-      scores: finalScores,
-      winner: winner?.username,
-    });
-
+    this.broadcast({ type: 'game_end', scores: finalScores, winner: finalScores[0]?.username });
+    this.notifyRegistry({ phase: 'lobby' });
     setTimeout(() => {
-      this.gameState.phase = 'lobby';
-      this.gameState.playerOrder = [];
-      for (const session of this.sessions.values()) {
-        session.isReady = false;
-        session.score = 0;
-      }
+      this.gameState.phase = 'lobby'; this.gameState.playerOrder = [];
+      for (const s of this.sessions.values()) { s.isReady = false; s.score = 0; }
       this.broadcast({ type: 'back_to_lobby', players: this.getPlayerList() });
     }, 10000);
   }
 
   handleDisconnect(clientId) {
     this.sessions.delete(clientId);
-
-    if (this.hostId === clientId) {
-      const next = this.sessions.keys().next().value;
-      this.hostId = next || null;
-    }
-
-    this.broadcast({
-      type: 'player_left',
-      clientId,
-      players: this.getPlayerList(),
-      playerCount: this.sessions.size,
-      hostId: this.hostId,
-    });
-
-    if (this.gameState.phase === 'drawing' && this.gameState.drawerId === clientId) {
-      this.endRound('drawer_left');
-    }
-
-    if (
-      this.sessions.size < MIN_PLAYERS &&
-      this.gameState.phase !== 'lobby' &&
-      this.gameState.phase !== 'gameEnd'
-    ) {
+    if (this.hostId === clientId) this.hostId = this.sessions.keys().next().value || null;
+    this.broadcast({ type: 'player_left', clientId, players: this.getPlayerList(), playerCount: this.sessions.size, hostId: this.hostId });
+    this.notifyRegistry({ playerCount: this.sessions.size });
+    if (this.sessions.size === 0) { this.notifyRegistry({ dead: true }); return; }
+    if (this.gameState.phase === 'drawing' && this.gameState.drawerId === clientId) this.endRound('drawer_left');
+    if (this.sessions.size < MIN_PLAYERS && !['lobby','gameEnd'].includes(this.gameState.phase)) {
       if (this.timerInterval) clearInterval(this.timerInterval);
       this.gameState.phase = 'lobby';
       this.broadcast({ type: 'game_cancelled', reason: 'Pemain terlalu sedikit', players: this.getPlayerList() });
+      this.notifyRegistry({ phase: 'lobby' });
     }
-  }
-
-  generateInitialHint(word) {
-    this.gameState.revealedPositions = new Set();
-    return word.split('').map(c => c === ' ' ? ' ' : '_').join('');
   }
 
   revealMoreHint(word, totalRevealCount) {
     const chars = word.split('');
-    const hiddenPositions = chars
-      .map((c, i) => i)
-      .filter(i => chars[i] !== ' ' && !this.gameState.revealedPositions.has(i));
-
-    const targetTotal = Math.floor(chars.filter(c => c !== ' ').length * totalRevealCount * 0.3);
-    const toAdd = Math.max(0, targetTotal - this.gameState.revealedPositions.size);
-
-    const shuffled = hiddenPositions.sort(() => Math.random() - 0.5);
-    for (let i = 0; i < toAdd && i < shuffled.length; i++) {
-      this.gameState.revealedPositions.add(shuffled[i]);
-    }
-
-    return chars.map((c, i) => {
-      if (c === ' ') return ' ';
-      if (this.gameState.revealedPositions.has(i)) return c;
-      return '_';
-    }).join('');
+    const hidden = chars.map((c,i) => i).filter(i => chars[i] !== ' ' && !this.gameState.revealedPositions.has(i));
+    const target = Math.floor(chars.filter(c => c !== ' ').length * totalRevealCount * 0.3);
+    const toAdd = Math.max(0, target - this.gameState.revealedPositions.size);
+    hidden.sort(() => Math.random() - 0.5).slice(0, toAdd).forEach(i => this.gameState.revealedPositions.add(i));
+    return chars.map((c, i) => c === ' ' ? ' ' : this.gameState.revealedPositions.has(i) ? c : '_').join('');
   }
 
-  getScores() {
-    return [...this.sessions.entries()]
-      .map(([id, s]) => ({ clientId: id, username: s.username, score: s.score }))
-      .sort((a, b) => b.score - a.score);
-  }
+  getScores() { return [...this.sessions.entries()].map(([id,s]) => ({ clientId: id, username: s.username, score: s.score })).sort((a,b) => b.score - a.score); }
+  getPlayerList() { return [...this.sessions.entries()].map(([id,s]) => ({ clientId: id, username: s.username, score: s.score, isReady: s.isReady })); }
+  getPublicGameState() { return { phase: this.gameState.phase, round: this.gameState.round, maxRounds: this.gameState.maxRounds, drawerId: this.gameState.drawerId, drawerName: this.sessions.get(this.gameState.drawerId)?.username, timeLeft: this.gameState.timeLeft, hint: this.gameState.wordHint, wordLength: this.gameState.currentWord?.length, playerCount: this.sessions.size, config: this.gameState.config }; }
 
-  getPlayerList() {
-    return [...this.sessions.entries()].map(([id, s]) => ({
-      clientId: id,
-      username: s.username,
-      score: s.score,
-      isReady: s.isReady,
-    }));
-  }
-
-  getPublicGameState() {
-    return {
-      phase: this.gameState.phase,
-      round: this.gameState.round,
-      maxRounds: this.gameState.maxRounds,
-      drawerId: this.gameState.drawerId,
-      drawerName: this.sessions.get(this.gameState.drawerId)?.username,
-      timeLeft: this.gameState.timeLeft,
-      hint: this.gameState.wordHint,
-      wordLength: this.gameState.currentWord?.length,
-      playerCount: this.sessions.size,
-      config: this.gameState.config,
-    };
-  }
-
-  send(clientId, data) {
-    const session = this.sessions.get(clientId);
-    if (session?.ws.readyState === WebSocket.OPEN) {
-      try {
-        session.ws.send(JSON.stringify(data));
-      } catch (e) {}
-    }
-  }
-
-  broadcast(data, excludeId = null) {
-    const json = JSON.stringify(data);
-    for (const [id, session] of this.sessions) {
-      if (id === excludeId) continue;
-      if (session.ws.readyState === WebSocket.OPEN) {
-        try {
-          session.ws.send(json);
-        } catch (e) {}
-      }
-    }
-  }
-
-  broadcastExcept(excludeId, data) {
-    this.broadcast(data, excludeId);
-  }
-}
+  send(clientId, data) { const s = this.sessions.get(clientId); if (s?.ws.readyState === WebSocket.OPEN) try { s.ws.send(JSON.stringify(data)); } catch(_) {} }
+  broadcast(data, excludeId = null) { const j = JSON.stringify(data); for (const [id,s] of this.sessions) { if (id === excludeId) continue; if (s.ws.readyState === WebSocket.OPEN) try { s.ws.send(j); } catch(_) {} } }
+  broadcastExcept(excludeId, data) { this.broadcast(data, excludeId); }
+}v
