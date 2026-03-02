@@ -1,5 +1,22 @@
 // =============================================================================
 // CLOUDFLARE WORKER - GambarYuk! Drawing Game
+// + Discord OAuth 2.0 Login
+// =============================================================================
+//
+// SETUP DISCORD OAUTH:
+// 1. Buka https://discord.com/developers/applications
+// 2. Buat aplikasi baru (atau pakai yang sudah ada)
+// 3. Di menu "OAuth2":
+//    - Client ID    → simpan sebagai env var: DISCORD_CLIENT_ID
+//    - Client Secret → simpan sebagai env var: DISCORD_CLIENT_SECRET
+//    - Tambah Redirect URI: https://mainyuk.secret5.workers.dev/auth/discord/callback
+// 4. Di Cloudflare Workers dashboard, tambah env vars:
+//    - DISCORD_CLIENT_ID
+//    - DISCORD_CLIENT_SECRET
+//    - DISCORD_REDIRECT_URI = https://mainyuk.secret5.workers.dev/auth/discord/callback
+//    - SESSION_SECRET = (random string panjang, untuk sign token)
+//    - TURNSTILE_SECRET (sudah ada sebelumnya)
+//
 // =============================================================================
 
 const QUEUE_CONFIG = {
@@ -9,15 +26,148 @@ const QUEUE_CONFIG = {
   QUEUE_EXPIRY_MS: 5 * 60 * 1000,
 };
 
+// Discord OAuth scopes yang dibutuhkan
+const DISCORD_SCOPES = 'identify';
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const corsHeaders = {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     };
     if (request.method === 'OPTIONS') return new Response(null, { headers: corsHeaders });
+
+    // ── DISCORD OAUTH: Step 1 — Redirect ke Discord ──────────────────────
+    if (url.pathname === '/auth/discord') {
+      const state = url.searchParams.get('state') || crypto.randomUUID().slice(0, 16);
+      const clientId = env.DISCORD_CLIENT_ID;
+      const redirectUri = env.DISCORD_REDIRECT_URI || (url.origin + '/auth/discord/callback');
+
+      if (!clientId) {
+        return new Response(JSON.stringify({ error: 'Discord OAuth belum dikonfigurasi.' }), {
+          status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      const discordAuthUrl = 'https://discord.com/oauth2/authorize?' + new URLSearchParams({
+        client_id: clientId,
+        redirect_uri: redirectUri,
+        response_type: 'code',
+        scope: DISCORD_SCOPES,
+        state: state,
+        prompt: 'none', // skip consent screen jika sudah pernah login
+      });
+
+      return Response.redirect(discordAuthUrl, 302);
+    }
+
+    // ── DISCORD OAUTH: Step 2 — Callback dari Discord ────────────────────
+    if (url.pathname === '/auth/discord/callback') {
+      const code = url.searchParams.get('code');
+      const error = url.searchParams.get('error');
+      // state bisa divalidasi di sini jika disimpan di KV
+
+      if (error || !code) {
+        return new Response(JSON.stringify({ error: error || 'Tidak ada code dari Discord' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      const clientId = env.DISCORD_CLIENT_ID;
+      const clientSecret = env.DISCORD_CLIENT_SECRET;
+      const redirectUri = env.DISCORD_REDIRECT_URI || (url.origin + '/auth/discord/callback');
+
+      if (!clientId || !clientSecret) {
+        return new Response(JSON.stringify({ error: 'Discord OAuth credentials belum dikonfigurasi di Worker env vars.' }), {
+          status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      try {
+        // Tukar code → access token
+        const tokenRes = await fetch('https://discord.com/api/oauth2/token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            client_id: clientId,
+            client_secret: clientSecret,
+            grant_type: 'authorization_code',
+            code: code,
+            redirect_uri: redirectUri,
+          }),
+        });
+
+        if (!tokenRes.ok) {
+          const errBody = await tokenRes.text();
+          console.error('Discord token exchange failed:', errBody);
+          return new Response(JSON.stringify({ error: 'Gagal tukar token Discord.' }), {
+            status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+
+        const tokenData = await tokenRes.json();
+        const accessToken = tokenData.access_token;
+
+        // Ambil info user dari Discord
+        const userRes = await fetch('https://discord.com/api/users/@me', {
+          headers: { Authorization: 'Bearer ' + accessToken },
+        });
+
+        if (!userRes.ok) {
+          return new Response(JSON.stringify({ error: 'Gagal ambil data user Discord.' }), {
+            status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+
+        const userData = await userRes.json();
+        // userData: { id, username, global_name, avatar, discriminator, ... }
+
+        // Generate session token (simpan di KV supaya bisa divalidasi)
+        const sessionToken = await generateSessionToken(env, userData);
+
+        // Kembalikan data user + session token ke frontend
+        return new Response(JSON.stringify({
+          id: userData.id,
+          username: userData.username,
+          global_name: userData.global_name || userData.username,
+          avatar: userData.avatar,
+          sessionToken: sessionToken,
+        }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+
+      } catch (e) {
+        console.error('Discord callback error:', e);
+        return new Response(JSON.stringify({ error: 'Internal error saat proses OAuth: ' + e.message }), {
+          status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+    }
+
+    // ── AUTH: Validate session & return user info ─────────────────────────
+    if (url.pathname === '/auth/me') {
+      const authHeader = request.headers.get('Authorization') || '';
+      const token = authHeader.replace('Bearer ', '').trim();
+
+      if (!token) {
+        return new Response(JSON.stringify({ error: 'No token' }), {
+          status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      const userData = await validateSessionToken(env, token);
+      if (!userData) {
+        return new Response(JSON.stringify({ error: 'Session tidak valid atau kedaluwarsa' }), {
+          status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      return new Response(JSON.stringify(userData), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
 
     // --- WebSocket room ---
     if (url.pathname.startsWith('/room/')) {
@@ -45,69 +195,183 @@ export default {
     // --- Create room ---
     if (url.pathname === '/create-room') {
       let captchaToken = null, queueId = null, roomName = null, password = null;
+      let discordSessionToken = null, discordId = null;
+
       if (request.method === 'POST') {
-        try { const b = await request.json(); captchaToken = b.captcha; queueId = b.queueId; roomName = b.roomName; password = b.password || null; } catch (_) {}
+        try {
+          const b = await request.json();
+          captchaToken = b.captcha;
+          queueId = b.queueId;
+          roomName = b.roomName;
+          password = b.password || null;
+          discordSessionToken = b.discordSessionToken || null;
+          discordId = b.discordId || null;
+        } catch (_) {}
       } else {
         captchaToken = url.searchParams.get('captcha');
         queueId = url.searchParams.get('queueId');
       }
-      if (!captchaToken) return new Response(JSON.stringify({ error: 'CAPTCHA token tidak ditemukan' }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
 
-      const secret = env.TURNSTILE_SECRET;
-      if (secret) {
-        const vr = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ secret, response: captchaToken, remoteip: request.headers.get('CF-Connecting-IP') || undefined }),
+      if (!captchaToken) {
+        return new Response(JSON.stringify({ error: 'CAPTCHA token tidak ditemukan' }), {
+          status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
-        const vd = await vr.json();
-        if (!vd.success) return new Response(JSON.stringify({ error: 'Verifikasi CAPTCHA gagal. Coba lagi.', codes: vd['error-codes'] || [] }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // Discord users: validasi session token, skip Turnstile
+      if (discordSessionToken && captchaToken && captchaToken.startsWith('discord:')) {
+        const discordUserData = await validateSessionToken(env, discordSessionToken);
+        if (!discordUserData || discordUserData.id !== discordId) {
+          return new Response(JSON.stringify({ error: 'Sesi Discord tidak valid.' }), {
+            status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          });
+        }
+        // Discord user valid, skip CAPTCHA
+      } else {
+        // Regular Turnstile CAPTCHA check
+        const secret = env.TURNSTILE_SECRET;
+        if (secret) {
+          const vr = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ secret, response: captchaToken, remoteip: request.headers.get('CF-Connecting-IP') || undefined }),
+          });
+          const vd = await vr.json();
+          if (!vd.success) {
+            return new Response(JSON.stringify({ error: 'Verifikasi CAPTCHA gagal. Coba lagi.', codes: vd['error-codes'] || [] }), {
+              status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+            });
+          }
+        }
       }
 
       const queueStub = env.QUEUE_MANAGER.get(env.QUEUE_MANAGER.idFromName('global'));
       const clientIp = request.headers.get('CF-Connecting-IP') || 'unknown';
-      const qr = await queueStub.fetch(new Request('https://internal/enqueue', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ queueId, clientIp }) }));
+      const qr = await queueStub.fetch(new Request('https://internal/enqueue', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ queueId, clientIp }),
+      }));
       const qd = await qr.json();
 
-      if (qd.status === 'queued') return new Response(JSON.stringify({ queued: true, queueId: qd.queueId, position: qd.position, estimatedWait: qd.estimatedWait }), { status: 202, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      if (qd.status === 'queued') {
+        return new Response(JSON.stringify({ queued: true, queueId: qd.queueId, position: qd.position, estimatedWait: qd.estimatedWait }), {
+          status: 202, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
 
       if (qd.status === 'ready' || qd.status === 'immediate') {
         const roomId = generateRoomId();
-        await queueStub.fetch(new Request('https://internal/done', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ queueId: qd.queueId }) }));
-        // Daftarkan room ke registry
+        await queueStub.fetch(new Request('https://internal/done', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ queueId: qd.queueId }),
+        }));
         const registry = env.ROOM_REGISTRY.get(env.ROOM_REGISTRY.idFromName('global'));
         await registry.fetch(new Request('https://internal/register', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ roomId, roomName: roomName || ('Room ' + roomId), password: password || null }),
         }));
         return new Response(JSON.stringify({ roomId }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
-      return new Response(JSON.stringify({ error: 'Status antrian tidak dikenal' }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+      return new Response(JSON.stringify({ error: 'Status antrian tidak dikenal' }), {
+        status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
     }
 
-    // --- Update room info (dipanggil DO GameRoom) ---
+    // --- Update room info ---
     if (url.pathname === '/room-update') {
       if (request.method === 'POST') {
         try {
           const b = await request.json();
           const registry = env.ROOM_REGISTRY.get(env.ROOM_REGISTRY.idFromName('global'));
-          await registry.fetch(new Request('https://internal/update', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) }));
+          await registry.fetch(new Request('https://internal/update', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(b),
+          }));
         } catch (_) {}
       }
       return new Response('ok', { headers: corsHeaders });
     }
 
     return new Response('GambarYuk Worker Active', { headers: corsHeaders });
-  }
+  },
 };
 
 // =============================================================================
+// SESSION TOKEN HELPERS (menggunakan KV atau simple HMAC)
+// =============================================================================
+
+/**
+ * Generate session token dan simpan di KV (jika tersedia) atau pakai HMAC.
+ * Token disimpan 7 hari.
+ */
+async function generateSessionToken(env, userData) {
+  const tokenPayload = {
+    id: userData.id,
+    username: userData.username,
+    global_name: userData.global_name || userData.username,
+    avatar: userData.avatar,
+    iat: Date.now(),
+    exp: Date.now() + (7 * 24 * 60 * 60 * 1000),
+  };
+
+  // Pakai KV jika tersedia untuk menyimpan session
+  if (env.SESSIONS_KV) {
+    const tokenId = crypto.randomUUID();
+    await env.SESSIONS_KV.put(
+      'session:' + tokenId,
+      JSON.stringify(tokenPayload),
+      { expirationTtl: 7 * 24 * 60 * 60 }
+    );
+    return tokenId;
+  }
+
+  // Fallback: encode sebagai base64 JSON (tidak aman untuk produksi, tapi fungsional)
+  // Untuk produksi sebaiknya gunakan KV atau gunakan HMAC signing
+  return btoa(JSON.stringify(tokenPayload));
+}
+
+/**
+ * Validasi session token. Return user data atau null jika invalid.
+ */
+async function validateSessionToken(env, token) {
+  if (!token) return null;
+
+  // Coba KV dulu
+  if (env.SESSIONS_KV) {
+    try {
+      const raw = await env.SESSIONS_KV.get('session:' + token);
+      if (!raw) return null;
+      const data = JSON.parse(raw);
+      if (data.exp && data.exp < Date.now()) {
+        await env.SESSIONS_KV.delete('session:' + token);
+        return null;
+      }
+      return data;
+    } catch (_) {}
+  }
+
+  // Fallback: decode base64
+  try {
+    const data = JSON.parse(atob(token));
+    if (data.exp && data.exp < Date.now()) return null;
+    return data;
+  } catch (_) {
+    return null;
+  }
+}
+
+// =============================================================================
 // DURABLE OBJECT - Room Registry
-// Menyimpan daftar room yang aktif (untuk room list)
 // =============================================================================
 export class RoomRegistry {
   constructor(state) {
     this.state = state;
-    this.rooms = new Map(); // roomId -> { roomName, password, playerCount, phase, createdAt }
+    this.rooms = new Map();
     this.initialized = false;
   }
 
@@ -122,7 +386,7 @@ export class RoomRegistry {
   cleanStale() {
     const now = Date.now();
     for (const [id, r] of this.rooms) {
-      if (now - r.createdAt > 4 * 60 * 60 * 1000) this.rooms.delete(id); // hapus setelah 4 jam
+      if (now - r.createdAt > 4 * 60 * 60 * 1000) this.rooms.delete(id);
     }
   }
 
@@ -163,7 +427,6 @@ export class RoomRegistry {
       return new Response('ok');
     }
 
-    // Verify password
     if (url.pathname === '/verify-password') {
       const b = await request.json();
       const r = this.rooms.get(b.roomId);
@@ -304,7 +567,7 @@ export class GameRoom {
     this.env = env;
     this.sessions = new Map();
     this.hostId = null;
-    this.roomId = null; // set saat WS pertama connect
+    this.roomId = null;
     this.gameState = {
       phase: 'lobby', round: 0, maxRounds: MAX_ROUNDS,
       drawerId: null, currentWord: null, wordHint: null,
@@ -318,7 +581,6 @@ export class GameRoom {
 
   async fetch(request) {
     if (request.headers.get('Upgrade') !== 'websocket') return new Response('Expected WebSocket', { status: 400 });
-    // Ambil roomId dari URL
     const url = new URL(request.url);
     this.roomId = url.pathname.split('/')[2] || this.roomId;
     const [client, server] = Object.values(new WebSocketPair());
@@ -331,7 +593,8 @@ export class GameRoom {
     try {
       const registry = this.env.ROOM_REGISTRY.get(this.env.ROOM_REGISTRY.idFromName('global'));
       await registry.fetch(new Request('https://internal/update', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ roomId: this.roomId, ...updates }),
       }));
     } catch (_) {}
@@ -340,7 +603,17 @@ export class GameRoom {
   handleSession(ws, request) {
     ws.accept();
     const clientId = crypto.randomUUID();
-    const session = { ws, clientId, username: `Player_${clientId.slice(0, 4)}`, score: 0, isReady: false, joinedAt: Date.now() };
+    const session = {
+      ws,
+      clientId,
+      username: `Player_${clientId.slice(0, 4)}`,
+      score: 0,
+      isReady: false,
+      joinedAt: Date.now(),
+      // Discord fields
+      discordId: null,
+      avatarUrl: null,
+    };
     this.sessions.set(clientId, session);
     if (!this.hostId) this.hostId = clientId;
 
@@ -350,7 +623,14 @@ export class GameRoom {
     ws.addEventListener('close', () => this.handleDisconnect(clientId));
     ws.addEventListener('error', () => this.handleDisconnect(clientId));
 
-    this.send(clientId, { type: 'welcome', clientId, hostId: this.hostId, gameState: this.getPublicGameState(), players: this.getPlayerList(), config: this.gameState.config });
+    this.send(clientId, {
+      type: 'welcome',
+      clientId,
+      hostId: this.hostId,
+      gameState: this.getPublicGameState(),
+      players: this.getPlayerList(),
+      config: this.gameState.config,
+    });
     this.broadcast({ type: 'player_joined', players: this.getPlayerList(), playerCount: this.sessions.size, hostId: this.hostId }, clientId);
     this.notifyRegistry({ playerCount: this.sessions.size, phase: this.gameState.phase, maxPlayers: this.gameState.config.maxPlayers });
   }
@@ -361,7 +641,13 @@ export class GameRoom {
     const type = msg.type;
 
     if (type === 'set_username') {
-      session.username = msg.username.slice(0, 20).trim() || session.username;
+      session.username = (msg.username || '').slice(0, 20).trim() || session.username;
+
+      // Simpan info Discord jika ada
+      if (msg.discordId) session.discordId = msg.discordId;
+      if (msg.avatarUrl) session.avatarUrl = msg.avatarUrl;
+      if (msg.discordDisplayName) session.discordDisplayName = msg.discordDisplayName;
+
       this.broadcast({ type: 'player_joined', players: this.getPlayerList(), playerCount: this.sessions.size, hostId: this.hostId });
 
     } else if (type === 'set_config') {
@@ -374,7 +660,6 @@ export class GameRoom {
       this.notifyRegistry({ maxPlayers: cfg.maxPlayers });
 
     } else if (type === 'kick_player') {
-      // Host bisa kick pemain lain di lobby
       if (clientId !== this.hostId) return;
       if (this.gameState.phase !== 'lobby') return;
       const targetId = msg.targetId;
@@ -431,7 +716,7 @@ export class GameRoom {
     } else if (type === 'guess') {
       this.handleGuess(clientId, msg.text);
     } else if (type === 'chat') {
-      this.broadcast({ type: 'chat', username: session.username, text: msg.text.slice(0, 200), clientId });
+      this.broadcast({ type: 'chat', username: session.username, text: (msg.text || '').slice(0, 200), clientId });
     } else if (type === 'start_game') {
       if (this.gameState.phase === 'lobby' && this.sessions.size >= MIN_PLAYERS) this.startGame();
       else if (this.sessions.size < MIN_PLAYERS) this.send(clientId, { type: 'error', message: `Butuh minimal ${MIN_PLAYERS} pemain!` });
@@ -443,7 +728,7 @@ export class GameRoom {
   handleGuess(clientId, text) {
     const session = this.sessions.get(clientId);
     if (!session || this.gameState.phase !== 'drawing' || clientId === this.gameState.drawerId || this.gameState.correctGuessers.has(clientId) || !this.gameState.currentWord) return;
-    this.broadcast({ type: 'wrong_guess', username: session.username, text: text.trim().slice(0, 100), clientId });
+    this.broadcast({ type: 'wrong_guess', username: session.username, text: (text || '').trim().slice(0, 100), clientId });
   }
 
   checkStartGame() {
@@ -457,7 +742,6 @@ export class GameRoom {
     this.gameState.maxRounds = this.gameState.config.maxRounds;
     for (const [id, s] of this.sessions) { s.score = 0; this.gameState.scores[id] = 0; }
     const allIds = [...this.sessions.keys()];
-    // Fisher-Yates shuffle — 3x pass untuk memastikan benar-benar acak
     for (let pass = 0; pass < 3; pass++) {
       for (let i = allIds.length - 1; i > 0; i--) {
         const j = Math.floor(Math.random() * (i + 1));
@@ -491,7 +775,9 @@ export class GameRoom {
     this.broadcastExcept(drawerId, { type: 'round_start_guesser', round: this.gameState.round, maxRounds: totalDisplay, drawerId, drawerName, hint: '____', wordLength: 0, timeLeft: this.gameState.config.drawTime });
   }
 
-  buildSecondLetterHint(word) { return word.split('').map((c, i) => c === ' ' ? ' ' : i === 1 ? c : '_').join(''); }
+  buildSecondLetterHint(word) {
+    return word.split('').map((c, i) => c === ' ' ? ' ' : i === 1 ? c : '_').join('');
+  }
 
   startRoundTimer() {
     if (this.timerInterval) clearInterval(this.timerInterval);
@@ -527,7 +813,7 @@ export class GameRoom {
     this.notifyRegistry({ phase: 'lobby' });
     setTimeout(() => {
       this.gameState.phase = 'lobby';
-      this.gameState.playerOrder = []; // reset urutan, akan diacak ulang saat startGame berikutnya
+      this.gameState.playerOrder = [];
       for (const s of this.sessions.values()) { s.isReady = false; s.score = 0; }
       this.broadcast({ type: 'back_to_lobby', players: this.getPlayerList() });
     }, 10000);
@@ -540,7 +826,7 @@ export class GameRoom {
     this.notifyRegistry({ playerCount: this.sessions.size });
     if (this.sessions.size === 0) { this.notifyRegistry({ dead: true }); return; }
     if (this.gameState.phase === 'drawing' && this.gameState.drawerId === clientId) this.endRound('drawer_left');
-    if (this.sessions.size < MIN_PLAYERS && !['lobby','gameEnd'].includes(this.gameState.phase)) {
+    if (this.sessions.size < MIN_PLAYERS && !['lobby', 'gameEnd'].includes(this.gameState.phase)) {
       if (this.timerInterval) clearInterval(this.timerInterval);
       this.gameState.phase = 'lobby';
       this.broadcast({ type: 'game_cancelled', reason: 'Pemain terlalu sedikit', players: this.getPlayerList() });
@@ -550,18 +836,61 @@ export class GameRoom {
 
   revealMoreHint(word, totalRevealCount) {
     const chars = word.split('');
-    const hidden = chars.map((c,i) => i).filter(i => chars[i] !== ' ' && !this.gameState.revealedPositions.has(i));
+    const hidden = chars.map((c, i) => i).filter(i => chars[i] !== ' ' && !this.gameState.revealedPositions.has(i));
     const target = Math.floor(chars.filter(c => c !== ' ').length * totalRevealCount * 0.3);
     const toAdd = Math.max(0, target - this.gameState.revealedPositions.size);
     hidden.sort(() => Math.random() - 0.5).slice(0, toAdd).forEach(i => this.gameState.revealedPositions.add(i));
     return chars.map((c, i) => c === ' ' ? ' ' : this.gameState.revealedPositions.has(i) ? c : '_').join('');
   }
 
-  getScores() { return [...this.sessions.entries()].map(([id,s]) => ({ clientId: id, username: s.username, score: s.score })).sort((a,b) => b.score - a.score); }
-  getPlayerList() { return [...this.sessions.entries()].map(([id,s]) => ({ clientId: id, username: s.username, score: s.score, isReady: s.isReady })); }
-  getPublicGameState() { return { phase: this.gameState.phase, round: this.gameState.round, maxRounds: this.gameState.maxRounds, drawerId: this.gameState.drawerId, drawerName: this.sessions.get(this.gameState.drawerId)?.username, timeLeft: this.gameState.timeLeft, hint: this.gameState.wordHint, wordLength: this.gameState.currentWord?.length, playerCount: this.sessions.size, config: this.gameState.config }; }
+  getScores() {
+    return [...this.sessions.entries()]
+      .map(([id, s]) => ({ clientId: id, username: s.username, score: s.score, avatarUrl: s.avatarUrl || null }))
+      .sort((a, b) => b.score - a.score);
+  }
 
-  send(clientId, data) { const s = this.sessions.get(clientId); if (s?.ws.readyState === WebSocket.OPEN) try { s.ws.send(JSON.stringify(data)); } catch(_) {} }
-  broadcast(data, excludeId = null) { const j = JSON.stringify(data); for (const [id,s] of this.sessions) { if (id === excludeId) continue; if (s.ws.readyState === WebSocket.OPEN) try { s.ws.send(j); } catch(_) {} } }
+  getPlayerList() {
+    return [...this.sessions.entries()].map(([id, s]) => ({
+      clientId: id,
+      username: s.username,
+      score: s.score,
+      isReady: s.isReady,
+      discordId: s.discordId || null,
+      avatarUrl: s.avatarUrl || null,
+    }));
+  }
+
+  getPublicGameState() {
+    return {
+      phase: this.gameState.phase,
+      round: this.gameState.round,
+      maxRounds: this.gameState.maxRounds,
+      drawerId: this.gameState.drawerId,
+      drawerName: this.sessions.get(this.gameState.drawerId)?.username,
+      timeLeft: this.gameState.timeLeft,
+      hint: this.gameState.wordHint,
+      wordLength: this.gameState.currentWord?.length,
+      playerCount: this.sessions.size,
+      config: this.gameState.config,
+    };
+  }
+
+  send(clientId, data) {
+    const s = this.sessions.get(clientId);
+    if (s?.ws.readyState === WebSocket.OPEN) {
+      try { s.ws.send(JSON.stringify(data)); } catch (_) {}
+    }
+  }
+
+  broadcast(data, excludeId = null) {
+    const j = JSON.stringify(data);
+    for (const [id, s] of this.sessions) {
+      if (id === excludeId) continue;
+      if (s.ws.readyState === WebSocket.OPEN) {
+        try { s.ws.send(j); } catch (_) {}
+      }
+    }
+  }
+
   broadcastExcept(excludeId, data) { this.broadcast(data, excludeId); }
 }
