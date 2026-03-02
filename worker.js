@@ -122,21 +122,20 @@ export default {
         }
 
         const userData = await userRes.json();
-        // userData: { id, username, global_name, avatar, discriminator, ... }
 
-        // Generate session token (simpan di KV supaya bisa divalidasi)
+        // Generate session token
         const sessionToken = await generateSessionToken(env, userData);
 
-        // Kembalikan data user + session token ke frontend
-        return new Response(JSON.stringify({
-          id: userData.id,
-          username: userData.username,
-          global_name: userData.global_name || userData.username,
-          avatar: userData.avatar,
-          sessionToken: sessionToken,
-        }), {
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        });
+        // Redirect balik ke frontend dengan data sebagai query params
+        const frontendUrl = env.FRONTEND_URL || 'https://mainyuk-fronted.pages.dev';
+        const redirectUrl = new URL(frontendUrl);
+        redirectUrl.searchParams.set('dc_id', userData.id);
+        redirectUrl.searchParams.set('dc_username', userData.username);
+        redirectUrl.searchParams.set('dc_name', userData.global_name || userData.username);
+        redirectUrl.searchParams.set('dc_avatar', userData.avatar || '');
+        redirectUrl.searchParams.set('dc_token', sessionToken);
+
+        return Response.redirect(redirectUrl.toString(), 302);
 
       } catch (e) {
         console.error('Discord callback error:', e);
